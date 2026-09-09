@@ -28,7 +28,13 @@ set -Eeuo pipefail
 ###############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Script:
+#   <repo>/scripts/build-wheezy-armel.sh
+#
+# Project root:
+#   <repo>
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 OUTPUT_DIR="$PROJECT_DIR/output"
 ROOTFS="$OUTPUT_DIR/rootfs"
@@ -40,7 +46,7 @@ ROOTFS="$OUTPUT_DIR/rootfs"
 ARCH="armel"
 SUITE="wheezy"
 
-# Debian Wheezy is archived.
+# Debian Wheezy is EOL and archived.
 MIRROR="http://archive.debian.org/debian"
 
 ###############################################################################
@@ -57,6 +63,7 @@ export LANG=C
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: This script must be run as root."
+    echo
     echo "Run:"
     echo
     echo "    sudo scripts/build-wheezy-armel.sh"
@@ -74,6 +81,7 @@ REQUIRED_COMMANDS=(
     debootstrap
     mount
     umount
+    mountpoint
     chroot
     tar
 )
@@ -172,10 +180,10 @@ cp \
     "$ROOTFS/usr/bin/qemu-arm-static"
 
 ###############################################################################
-# Configure APT
+# Configure APT for Debian Archive
 ###############################################################################
 
-echo "==> Configuring APT"
+echo "==> Configuring Debian Wheezy archive"
 
 mkdir -p "$ROOTFS/etc/apt/apt.conf.d"
 
@@ -188,10 +196,11 @@ cat > "$ROOTFS/etc/apt/apt.conf.d/99archive" <<'EOF'
 Acquire::Check-Valid-Until "false";
 Acquire::AllowInsecureRepositories "true";
 Acquire::AllowDowngradeToInsecureRepositories "true";
+APT::Get::AllowUnauthenticated "true";
 EOF
 
 ###############################################################################
-# DNS
+# Temporary DNS
 ###############################################################################
 
 echo "==> Configuring temporary DNS"
@@ -220,6 +229,7 @@ mount -t sysfs sysfs "$ROOTFS/sys"
 echo "==> Mounting /run"
 
 mkdir -p "$ROOTFS/run"
+
 mount --bind /run "$ROOTFS/run"
 
 ###############################################################################
@@ -294,7 +304,7 @@ iface lo inet loopback
 EOF
 
 ###############################################################################
-# Install minimal packages
+# Install minimal userspace
 ###############################################################################
 
 echo
@@ -311,13 +321,22 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 export LANG=C
 
+###############################################################################
+# APT update
+###############################################################################
+
 echo "==> Updating package lists"
 
 apt-get \
     -o Acquire::Check-Valid-Until=false \
     -o Acquire::AllowInsecureRepositories=true \
     -o Acquire::AllowDowngradeToInsecureRepositories=true \
+    -o APT::Get::AllowUnauthenticated=true \
     update
+
+###############################################################################
+# Install packages
+###############################################################################
 
 echo "==> Installing packages"
 
@@ -325,9 +344,10 @@ apt-get \
     -o Acquire::Check-Valid-Until=false \
     -o Acquire::AllowInsecureRepositories=true \
     -o Acquire::AllowDowngradeToInsecureRepositories=true \
+    -o APT::Get::AllowUnauthenticated=true \
     install -y \
+    --allow-unauthenticated \
     --no-install-recommends \
-    init \
     sysvinit \
     sysvinit-utils \
     udev \
@@ -345,15 +365,18 @@ apt-get \
 CHROOT
 
 ###############################################################################
-# Ensure init exists
+# Verify init
 ###############################################################################
 
-echo "==> Verifying init"
+echo "==> Verifying /sbin/init"
 
 if [ ! -x "$ROOTFS/sbin/init" ]; then
     echo "ERROR: /sbin/init was not created."
     exit 1
 fi
+
+echo "==> /sbin/init:"
+ls -l "$ROOTFS/sbin/init"
 
 ###############################################################################
 # Remove QEMU from final rootfs
@@ -399,7 +422,7 @@ chmod 1777 "$ROOTFS/tmp"
 # Remove temporary DNS configuration
 ###############################################################################
 
-echo "==> Cleaning DNS configuration"
+echo "==> Removing temporary DNS configuration"
 
 rm -f "$ROOTFS/etc/resolv.conf"
 
@@ -421,21 +444,19 @@ Rootfs builder: GitHub Actions
 EOF
 
 ###############################################################################
-# Architecture verification
+# Verify Debian architecture
 ###############################################################################
 
-echo "==> Verifying ARMEL architecture"
+echo "==> Verifying Debian architecture"
 
 if [ -f "$ROOTFS/var/lib/dpkg/arch" ]; then
     echo "dpkg architecture information:"
     cat "$ROOTFS/var/lib/dpkg/arch"
 fi
 
-if [ -f "$ROOTFS/etc/dpkg/origins/debian" ]; then
-    echo "Debian origin detected."
-fi
-
+###############################################################################
 # Final cleanup
+###############################################################################
 
 echo
 echo "============================================================"
@@ -445,7 +466,9 @@ echo
 
 cleanup
 
-# Result
+###############################################################################
+# Final result
+###############################################################################
 
 echo
 echo "============================================================"
@@ -466,10 +489,5 @@ echo "  /dev/mmcblk0p2"
 echo
 echo "Init:"
 echo "  /sbin/init"
-echo
-echo "Existing boot files:"
-echo "  startup.txt"
-echo "  zImage"
-echo "  initrd.gz"
 echo
 echo "============================================================"
