@@ -133,15 +133,23 @@ jobs:
         run: |
           echo "==> Generating SHA256 checksum"
 
-          cd output
-
-          sha256sum \
-            debian-wheezy-armel.tar.xz \
-            > SHA256SUMS
+          sudo sha256sum \
+            output/debian-wheezy-armel.tar.xz \
+            | sudo tee output/SHA256SUMS > /dev/null
 
           echo
           echo "=== SHA256SUMS ==="
-          cat SHA256SUMS
+          sudo cat output/SHA256SUMS
+
+      - name: Fix output permissions
+        run: |
+          echo "==> Fixing output permissions"
+
+          sudo chmod -R a+rX output
+
+          echo
+          echo "=== Output permissions ==="
+          ls -lh output/
 
       - name: Show result
         run: |
@@ -154,6 +162,10 @@ jobs:
           echo
           echo "Rootfs archive:"
           du -h output/debian-wheezy-armel.tar.xz
+
+          echo
+          echo "SHA256:"
+          cat output/SHA256SUMS
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4
