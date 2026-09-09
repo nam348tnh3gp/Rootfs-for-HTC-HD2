@@ -59,7 +59,8 @@ jobs:
             rsync \
             xz-utils \
             tar \
-            gzip
+            gzip \
+            e2fsprogs
 
       - name: Enable ARM emulation
         run: |
@@ -118,23 +119,82 @@ jobs:
           echo "=== Architecture ==="
           sudo file output/rootfs/sbin/init
 
-      - name: Create compressed rootfs
+      - name: Create rootfs.ext4
         run: |
-          echo "==> Creating compressed rootfs"
+          echo "============================================================"
+          echo " Creating rootfs.ext4"
+          echo "============================================================"
 
-          sudo tar \
-            --numeric-owner \
-            --xattrs \
-            --acls \
-            -C output/rootfs \
-            -cJf output/debian-wheezy-armel.tar.xz .
+          ROOTFS_SIZE_MB=2048
+          IMAGE="output/rootfs.ext4"
+          MOUNT_POINT="/tmp/rootfs-ext4"
+
+          echo "==> Image size: ${ROOTFS_SIZE_MB} MB"
+
+          sudo mkdir -p "$MOUNT_POINT"
+
+          echo "==> Allocating image"
+
+          sudo dd \
+            if=/dev/zero \
+            of="$IMAGE" \
+            bs=1M \
+            count="$ROOTFS_SIZE_MB" \
+            status=progress
+
+          echo "==> Creating ext4 filesystem"
+
+          sudo mkfs.ext4 \
+            -F \
+            -L debian \
+            "$IMAGE"
+
+          echo "==> Mounting ext4 image"
+
+          sudo mount \
+            -o loop \
+            "$IMAGE" \
+            "$MOUNT_POINT"
+
+          echo "==> Copying Debian rootfs"
+
+          sudo cp -a \
+            output/rootfs/. \
+            "$MOUNT_POINT/"
+
+          echo "==> Syncing filesystem"
+
+          sudo sync
+
+          echo "==> Unmounting image"
+
+          sudo umount "$MOUNT_POINT"
+
+          sudo rmdir "$MOUNT_POINT"
+
+          echo "==> Checking ext4 filesystem"
+
+          sudo e2fsck \
+            -f \
+            -p \
+            "$IMAGE" || true
+
+          sudo chmod a+r "$IMAGE"
+
+          echo
+          echo "=== rootfs.ext4 ==="
+          ls -lh "$IMAGE"
+
+          echo
+          echo "=== Filesystem ==="
+          sudo file "$IMAGE"
 
       - name: Generate checksum
         run: |
           echo "==> Generating SHA256 checksum"
 
           sudo sha256sum \
-            output/debian-wheezy-armel.tar.xz \
+            output/rootfs.ext4 \
             | sudo tee output/SHA256SUMS > /dev/null
 
           echo
@@ -148,7 +208,7 @@ jobs:
           sudo chmod -R a+rX output
 
           echo
-          echo "=== Output permissions ==="
+          echo "=== Output ==="
           ls -lh output/
 
       - name: Show result
@@ -157,21 +217,23 @@ jobs:
           echo " Build result"
           echo "============================================================"
 
+          echo
+          echo "=== Output files ==="
           ls -lh output/
 
           echo
-          echo "Rootfs archive:"
-          du -h output/debian-wheezy-armel.tar.xz
+          echo "=== rootfs.ext4 size ==="
+          du -h output/rootfs.ext4
 
           echo
-          echo "SHA256:"
+          echo "=== SHA256 ==="
           cat output/SHA256SUMS
 
-      - name: Upload rootfs artifact
+      - name: Upload rootfs.ext4
         uses: actions/upload-artifact@v4
         with:
           name: debian-wheezy-armel-rootfs
           path: |
-            output/debian-wheezy-armel.tar.xz
+            output/rootfs.ext4
             output/SHA256SUMS
           if-no-files-found: error
