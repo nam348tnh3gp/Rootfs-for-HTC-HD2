@@ -36,10 +36,13 @@ set -Eeuo pipefail
 #   - SSH server
 #   - SSH auto-start
 #   - USB Ethernet gadget fallback
-#   - Xorg
+#   - Framebuffer Xorg
+#   - evdev touchscreen
+#   - tslib tools
 #   - xterm
 #   - matchbox-keyboard
-#   - Automatic GUI startup
+#   - Automatic GUI startup on tty1
+#   - CLI remains available on tty2
 ###############################################################################
 
 ###############################################################################
@@ -66,13 +69,15 @@ MIRROR="http://archive.debian.org/debian"
 # Network configuration
 ###############################################################################
 
-# HTC HD2 Wi-Fi interface.
 WIFI_IFACE="wlan0"
 
 # USB Ethernet gadget interface.
+#
+# IMPORTANT:
+# This is for g_ether USB gadget mode.
+# It is NOT a physical USB Ethernet adapter.
 USB_IFACE="usb0"
 
-# USB fallback address.
 USB_IP="192.168.7.2"
 USB_NETMASK="255.255.255.0"
 
@@ -80,18 +85,13 @@ USB_NETMASK="255.255.255.0"
 # GUI configuration
 ###############################################################################
 
-# HTC HD2 native display is commonly 480x800 portrait.
-# Change these if your framebuffer/kernel uses another resolution.
 SCREEN_WIDTH="480"
 SCREEN_HEIGHT="800"
 
-# Height reserved for virtual keyboard.
+# Approximate keyboard height.
 KEYBOARD_HEIGHT="240"
 
-# X display.
 DISPLAY_NUM=":0"
-
-# Virtual terminal used by Xorg.
 X_VT="vt1"
 
 ###############################################################################
@@ -342,10 +342,7 @@ tmpfs           /tmp   tmpfs defaults          0 0
 EOF
 
 ###############################################################################
-# Base network configuration
-#
-# Wi-Fi is intentionally NOT managed by ifupdown.
-# hd2-network manages Wi-Fi directly.
+# Network interfaces
 ###############################################################################
 
 echo "==> Configuring network"
@@ -427,7 +424,9 @@ apt-get \
     nano \
     ca-certificates \
     xserver-xorg \
-    xserver-xorg-input-tslib \
+    xserver-xorg-core \
+    xserver-xorg-video-fbdev \
+    xserver-xorg-input-evdev \
     xinit \
     xterm \
     matchbox-keyboard \
@@ -446,7 +445,6 @@ if [ ! -x "$ROOTFS/sbin/init" ]; then
     exit 1
 fi
 
-echo "==> /sbin/init:"
 ls -l "$ROOTFS/sbin/init"
 
 ###############################################################################
@@ -477,10 +475,6 @@ mkdir -p "$ROOTFS/usr/local/bin"
 
 cat > "$ROOTFS/usr/local/bin/wifi" <<'WIFI_EOF'
 #!/bin/sh
-
-###############################################################################
-# HTC HD2 Wi-Fi CLI
-###############################################################################
 
 IFACE="__WIFI_IFACE__"
 CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
@@ -559,7 +553,6 @@ wifi_scan()
     echo
 
     if command -v iwlist >/dev/null 2>&1; then
-
         echo "Scanning with iwlist..."
         echo
 
@@ -569,7 +562,6 @@ wifi_scan()
     fi
 
     if command -v iw >/dev/null 2>&1; then
-
         echo "Scanning with iw..."
         echo
 
@@ -580,8 +572,6 @@ wifi_scan()
 
     echo
     echo "[FAIL] Wi-Fi scan failed."
-    echo
-
     return 1
 }
 
@@ -592,11 +582,9 @@ wifi_connect()
     SSID="$*"
 
     if [ -z "$SSID" ]; then
-
         echo
         echo "SSID:"
         printf "> "
-
         IFS= read -r SSID
     fi
 
@@ -635,45 +623,38 @@ wifi_connect()
 
     TEMP_CONF="/tmp/wpa_supplicant.conf.$$"
 
-    cat > "$TEMP_CONF" <<EOF2
-ctrl_interface=/var/run/wpa_supplicant
-update_config=1
-country=00
+    {
+        echo "ctrl_interface=/var/run/wpa_supplicant"
+        echo "update_config=1"
+        echo "country=00"
+        echo
+        echo "network={"
+        printf '    ssid="%s"\n' "$SSID"
 
-network={
-    ssid="$SSID"
-EOF2
+        if [ -n "$PASSWORD" ]; then
 
-    if [ -n "$PASSWORD" ]; then
+            PSK="$(
+                wpa_passphrase "$SSID" "$PASSWORD" 2>/dev/null \
+                | sed -n 's/^[[:space:]]*psk=\(.*\)$/\1/p' \
+                | tail -n 1
+            )"
 
-        WPA_LINE="$(
-            wpa_passphrase "$SSID" "$PASSWORD" 2>/dev/null \
-            | sed -n 's/^[[:space:]]*psk="\{0,1\}\([^"]*\)"\{0,1\}$/    psk=\1/p' \
-            | tail -n 1
-        )"
+            if [ -z "$PSK" ]; then
+                echo "}"
+                rm -f "$TEMP_CONF"
 
-        if [ -z "$WPA_LINE" ]; then
+                echo "[FAIL] Unable to generate WPA PSK."
+                return 1
+            fi
 
-            rm -f "$TEMP_CONF"
+            printf '    psk=%s\n' "$PSK"
 
-            echo "[FAIL] Unable to generate WPA configuration."
-
-            return 1
+        else
+            echo "    key_mgmt=NONE"
         fi
 
-        echo "$WPA_LINE" >> "$TEMP_CONF"
-
-    else
-
-        cat >> "$TEMP_CONF" <<EOF2
-    key_mgmt=NONE
-EOF2
-
-    fi
-
-    cat >> "$TEMP_CONF" <<EOF2
-}
-EOF2
+        echo "}"
+    } > "$TEMP_CONF"
 
     chmod 600 "$TEMP_CONF"
     mv "$TEMP_CONF" "$CONF"
@@ -722,7 +703,6 @@ EOF2
 
         sleep 1
         COUNT=$((COUNT + 1))
-
     done
 
     if ! wpa_cli \
@@ -732,23 +712,18 @@ EOF2
 
         echo
         echo "[FAIL] Wi-Fi association failed."
-        echo
-
         return 1
     fi
 
     echo
     echo "[ OK ] Wi-Fi connected"
-
     echo
     echo "Requesting DHCP..."
 
     dhclient -r "$IFACE" 2>/dev/null || true
 
     if ! dhclient "$IFACE" 2>/dev/null; then
-
         echo "[FAIL] DHCP failed."
-
         return 1
     fi
 
@@ -761,7 +736,6 @@ EOF2
     echo
     echo "[ OK ] Network configured"
     echo "IP address: ${IP:-unknown}"
-
     echo
     echo "SSH:"
     echo "  ssh root@${IP:-<IP_ADDRESS>}"
@@ -789,25 +763,21 @@ wifi_test()
 
     echo
     echo "Interface state:"
-
     ip link show "$IFACE" 2>/dev/null || \
         ifconfig "$IFACE" 2>/dev/null || true
 
     echo
     echo "Wireless state:"
-
     iwconfig "$IFACE" 2>/dev/null || \
         echo "Wireless information unavailable."
 
     echo
     echo "IP address:"
-
     ip addr show "$IFACE" 2>/dev/null || \
         ifconfig "$IFACE" 2>/dev/null || true
 
     echo
     echo "Default route:"
-
     ip route 2>/dev/null | grep '^default' || \
         route -n 2>/dev/null | head
 
@@ -895,10 +865,6 @@ case "${1:-help}" in
 esac
 WIFI_EOF
 
-###############################################################################
-# Replace Wi-Fi interface placeholder
-###############################################################################
-
 sed -i \
     "s/__WIFI_IFACE__/$WIFI_IFACE/g" \
     "$ROOTFS/usr/local/bin/wifi"
@@ -923,20 +889,15 @@ if [ -f "$ROOTFS/etc/ssh/sshd_config" ]; then
         -e 's/^#*[[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' \
         "$ROOTFS/etc/ssh/sshd_config"
 
-    if ! grep -q '^PermitRootLogin' \
-        "$ROOTFS/etc/ssh/sshd_config"; then
-
+    grep -q '^PermitRootLogin' \
+        "$ROOTFS/etc/ssh/sshd_config" || \
         echo "PermitRootLogin yes" \
-            >> "$ROOTFS/etc/ssh/sshd_config"
-    fi
+        >> "$ROOTFS/etc/ssh/sshd_config"
 
-    if ! grep -q '^PasswordAuthentication' \
-        "$ROOTFS/etc/ssh/sshd_config"; then
-
+    grep -q '^PasswordAuthentication' \
+        "$ROOTFS/etc/ssh/sshd_config" || \
         echo "PasswordAuthentication yes" \
-            >> "$ROOTFS/etc/ssh/sshd_config"
-    fi
-
+        >> "$ROOTFS/etc/ssh/sshd_config"
 fi
 
 ###############################################################################
@@ -949,7 +910,6 @@ if [ -x "$ROOTFS/etc/init.d/ssh" ]; then
 
     chroot "$ROOTFS" \
         update-rc.d ssh defaults || true
-
 fi
 
 ###############################################################################
@@ -964,7 +924,6 @@ if ! ls "$ROOTFS/etc/ssh"/ssh_host_* >/dev/null 2>&1; then
 
     chroot "$ROOTFS" \
         ssh-keygen -A || true
-
 fi
 
 ###############################################################################
@@ -1001,7 +960,6 @@ start_wifi()
 
     if ! grep -q '^[[:space:]]*network=' \
         /etc/wpa_supplicant/wpa_supplicant.conf; then
-
         return 1
     fi
 
@@ -1025,8 +983,6 @@ start_wifi()
         -c /etc/wpa_supplicant/wpa_supplicant.conf \
         2>/dev/null; then
 
-        echo "==> Waiting for Wi-Fi..."
-
         COUNT=0
 
         while [ "\$COUNT" -lt 15 ]; do
@@ -1035,7 +991,6 @@ start_wifi()
                 -i "\$WIFI_IFACE" \
                 status 2>/dev/null \
                 | grep -q '^wpa_state=COMPLETED'; then
-
                 break
             fi
 
@@ -1049,9 +1004,7 @@ start_wifi()
             | grep -q '^wpa_state=COMPLETED'; then
 
             if dhclient "\$WIFI_IFACE" 2>/dev/null; then
-
                 echo "[ OK ] Wi-Fi connected."
-
                 return 0
             fi
         fi
@@ -1067,8 +1020,6 @@ start_wifi()
         -c /etc/wpa_supplicant/wpa_supplicant.conf \
         2>/dev/null; then
 
-        echo "==> Waiting for Wi-Fi..."
-
         COUNT=0
 
         while [ "\$COUNT" -lt 15 ]; do
@@ -1077,7 +1028,6 @@ start_wifi()
                 -i "\$WIFI_IFACE" \
                 status 2>/dev/null \
                 | grep -q '^wpa_state=COMPLETED'; then
-
                 break
             fi
 
@@ -1091,9 +1041,7 @@ start_wifi()
             | grep -q '^wpa_state=COMPLETED'; then
 
             if dhclient "\$WIFI_IFACE" 2>/dev/null; then
-
                 echo "[ OK ] Wi-Fi connected."
-
                 return 0
             fi
         fi
@@ -1108,16 +1056,14 @@ start_wifi()
 
 start_usb()
 {
-    echo "==> Trying USB Ethernet fallback."
+    echo "==> Trying USB Ethernet gadget fallback."
 
     modprobe g_ether 2>/dev/null || true
 
     sleep 1
 
     if ! ip link show "\$USB_IFACE" >/dev/null 2>&1; then
-
-        echo "[INFO] USB Ethernet interface not available."
-
+        echo "[INFO] USB Ethernet gadget interface not available."
         return 1
     fi
 
@@ -1137,7 +1083,7 @@ start_usb()
             2>/dev/null || true
     }
 
-    echo "[ OK ] USB Ethernet available."
+    echo "[ OK ] USB Ethernet gadget available."
     echo "      IP: \$USB_IP"
 
     return 0
@@ -1156,7 +1102,6 @@ case "\$1" in
         echo "==> Wi-Fi unavailable or not configured."
 
         start_usb || true
-
         ;;
 
     stop)
@@ -1166,7 +1111,6 @@ case "\$1" in
 
         ifconfig "\$WIFI_IFACE" down 2>/dev/null || true
         ifconfig "\$USB_IFACE" down 2>/dev/null || true
-
         ;;
 
     restart)
@@ -1190,7 +1134,7 @@ EOF
 chmod 755 "$ROOTFS/etc/init.d/hd2-network"
 
 ###############################################################################
-# Enable HTC HD2 network service
+# Enable network service
 ###############################################################################
 
 echo "==> Enabling HTC HD2 network service"
@@ -1242,7 +1186,7 @@ EOF
 chmod 755 "$ROOTFS/usr/local/bin/netinfo"
 
 ###############################################################################
-# Minimal X11 configuration
+# X11 directories
 ###############################################################################
 
 echo
@@ -1252,14 +1196,14 @@ echo "============================================================"
 echo
 
 mkdir -p "$ROOTFS/root"
-mkdir -p "$ROOTFS/etc/X11/xinit"
 mkdir -p "$ROOTFS/etc/X11/xorg.conf.d"
+mkdir -p "$ROOTFS/etc/X11/xinit"
 
 ###############################################################################
-# Xorg configuration
+# Xorg framebuffer + touchscreen configuration
 ###############################################################################
 
-cat > "$ROOTFS/etc/X11/xorg.conf.d/10-htc-hd2.conf" <<EOF
+cat > "$ROOTFS/etc/X11/xorg.conf.d/10-htc-hd2.conf" <<'EOF'
 Section "ServerFlags"
     Option "BlankTime" "0"
     Option "StandbyTime" "0"
@@ -1267,10 +1211,22 @@ Section "ServerFlags"
     Option "OffTime" "0"
 EndSection
 
+Section "Device"
+    Identifier "HTC HD2 framebuffer"
+    Driver "fbdev"
+    Option "fbdev" "/dev/fb0"
+EndSection
+
+Section "Screen"
+    Identifier "HTC HD2 screen"
+    Device "HTC HD2 framebuffer"
+    DefaultDepth 16
+EndSection
+
 Section "InputClass"
     Identifier "HTC HD2 touchscreen"
     MatchIsTouchscreen "on"
-    Driver "tslib"
+    Driver "evdev"
 EndSection
 EOF
 
@@ -1285,24 +1241,170 @@ module dejitter
 EOF
 
 ###############################################################################
+# Touchscreen helper
+###############################################################################
+
+cat > "$ROOTFS/usr/local/bin/touchscreen" <<'EOF'
+#!/bin/sh
+
+find_touchscreen()
+{
+    for event in /dev/input/event*; do
+
+        [ -e "$event" ] || continue
+
+        NAME=""
+
+        EVENT_NAME="/sys/class/input/$(basename "$event")/device/name"
+
+        if [ -f "$EVENT_NAME" ]; then
+            NAME="$(cat "$EVENT_NAME" 2>/dev/null || true)"
+        fi
+
+        case "$NAME" in
+            *touch*|*Touch*|*TOUCH*|*ts*|*TS*)
+                echo "$event"
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+case "${1:-info}" in
+
+    info)
+
+        echo
+        echo "========================================"
+        echo " HTC HD2 Touchscreen"
+        echo "========================================"
+        echo
+
+        if [ ! -d /dev/input ]; then
+            echo "[FAIL] /dev/input does not exist."
+            exit 1
+        fi
+
+        FOUND=0
+
+        for event in /dev/input/event*; do
+
+            [ -e "$event" ] || continue
+
+            FOUND=1
+
+            NAME_FILE="/sys/class/input/$(basename "$event")/device/name"
+
+            echo "$event"
+
+            if [ -f "$NAME_FILE" ]; then
+                echo "  Name: $(cat "$NAME_FILE" 2>/dev/null || true)"
+            fi
+
+            echo
+        done
+
+        if [ "$FOUND" -eq 0 ]; then
+            echo "[FAIL] No input event devices found."
+            exit 1
+        fi
+
+        TOUCH="$(find_touchscreen || true)"
+
+        if [ -n "$TOUCH" ]; then
+            echo "Detected touchscreen:"
+            echo "  $TOUCH"
+        else
+            echo "No touchscreen name detected automatically."
+            echo "Check the event devices above."
+        fi
+
+        ;;
+
+    test)
+
+        if ! command -v ts_test >/dev/null 2>&1; then
+            echo "[FAIL] ts_test not installed."
+            exit 1
+        fi
+
+        TOUCH="$(find_touchscreen || true)"
+
+        if [ -z "$TOUCH" ]; then
+            echo "[FAIL] Could not automatically detect touchscreen."
+            echo
+            echo "Try:"
+            echo "  touchscreen info"
+            echo
+            exit 1
+        fi
+
+        echo "Using touchscreen: $TOUCH"
+
+        export TSLIB_TSDEVICE="$TOUCH"
+
+        exec ts_test
+        ;;
+
+    calibrate)
+
+        if ! command -v ts_calibrate >/dev/null 2>&1; then
+            echo "[FAIL] ts_calibrate not installed."
+            exit 1
+        fi
+
+        TOUCH="$(find_touchscreen || true)"
+
+        if [ -z "$TOUCH" ]; then
+            echo "[FAIL] Could not automatically detect touchscreen."
+            echo
+            echo "Try:"
+            echo "  touchscreen info"
+            echo
+            exit 1
+        fi
+
+        echo "Using touchscreen: $TOUCH"
+
+        export TSLIB_TSDEVICE="$TOUCH"
+        export TSLIB_CALIBFILE="/etc/pointercal"
+
+        exec ts_calibrate
+        ;;
+
+    *)
+
+        echo "Usage:"
+        echo "  touchscreen info"
+        echo "  touchscreen test"
+        echo "  touchscreen calibrate"
+        exit 1
+        ;;
+
+esac
+EOF
+
+chmod 755 "$ROOTFS/usr/local/bin/touchscreen"
+
+###############################################################################
 # X session
 ###############################################################################
 
 cat > "$ROOTFS/root/.xinitrc" <<EOF
 #!/bin/sh
 
-###############################################################################
-# HTC HD2 minimal X11 session
-###############################################################################
-
 export DISPLAY=$DISPLAY_NUM
 
-# Disable screen blanking.
 xset s off
 xset -dpms
 xset s noblank
 
-# Start fullscreen terminal.
+###############################################################################
+# Fullscreen terminal
+###############################################################################
+
 xterm \
     -fullscreen \
     -fa "fixed" \
@@ -1312,23 +1414,24 @@ xterm \
 
 XTERM_PID=\$!
 
-# Give xterm a moment to initialize.
 sleep 1
 
-# Start virtual touchscreen keyboard.
-#
-# Keyboard occupies the lower part of the screen.
-# The exact rendering is handled by matchbox-keyboard.
+###############################################################################
+# Virtual touchscreen keyboard
+###############################################################################
+
 matchbox-keyboard \
     --geometry ${SCREEN_WIDTH}x${KEYBOARD_HEIGHT}+0+$((SCREEN_HEIGHT - KEYBOARD_HEIGHT)) \
     &
 
 KEYBOARD_PID=\$!
 
-# Keep the X session alive.
+###############################################################################
+# Keep X session alive while terminal is alive.
+###############################################################################
+
 wait \$XTERM_PID
 
-# If xterm exits, terminate keyboard and close X.
 kill \$KEYBOARD_PID 2>/dev/null || true
 
 exit 0
@@ -1338,6 +1441,8 @@ chmod 755 "$ROOTFS/root/.xinitrc"
 
 ###############################################################################
 # GUI launcher
+#
+# This is designed to run from tty1.
 ###############################################################################
 
 cat > "$ROOTFS/usr/local/bin/hd2-gui" <<EOF
@@ -1348,204 +1453,34 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin
 DISPLAY="$DISPLAY_NUM"
 VT="$X_VT"
 
-LOG="/var/log/hd2-gui.log"
+export DISPLAY
 
 mkdir -p /var/log
 
 ###############################################################################
-# Do not start duplicate X server.
+# Do not launch if X is already running.
 ###############################################################################
 
-if [ -f /tmp/hd2-xorg.pid ]; then
-
-    OLD_PID="\$(cat /tmp/hd2-xorg.pid 2>/dev/null || true)"
-
-    if [ -n "\$OLD_PID" ] && kill -0 "\$OLD_PID" 2>/dev/null; then
-        exit 0
-    fi
-
-    rm -f /tmp/hd2-xorg.pid
+if [ -S /tmp/.X11-unix/X0 ]; then
+    exit 0
 fi
 
 ###############################################################################
-# Start Xorg.
+# Start X through startx.
+#
+# Since this script is executed by init on tty1, startx gets
+# a real controlling VT instead of being started as a detached
+# background daemon.
 ###############################################################################
 
-echo "==> Starting Xorg" >> "\$LOG"
-
-Xorg "\$DISPLAY" \
-    "\$VT" \
-    -nolisten tcp \
-    -noreset \
-    >> "\$LOG" 2>&1 &
-
-XORG_PID=\$!
-
-echo "\$XORG_PID" > /tmp/hd2-xorg.pid
-
-###############################################################################
-# Wait for X server.
-###############################################################################
-
-COUNT=0
-
-while [ "\$COUNT" -lt 30 ]; do
-
-    if [ -S /tmp/.X11-unix/X0 ]; then
-        break
-    fi
-
-    if ! kill -0 "\$XORG_PID" 2>/dev/null; then
-
-        echo "[FAIL] Xorg exited." >> "\$LOG"
-
-        rm -f /tmp/hd2-xorg.pid
-
-        exit 1
-    fi
-
-    sleep 1
-
-    COUNT=\$((COUNT + 1))
-
-done
-
-###############################################################################
-# Verify X.
-###############################################################################
-
-if [ ! -S /tmp/.X11-unix/X0 ]; then
-
-    echo "[FAIL] X server did not start." >> "\$LOG"
-
-    kill "\$XORG_PID" 2>/dev/null || true
-
-    rm -f /tmp/hd2-xorg.pid
-
-    exit 1
-fi
-
-echo "[ OK ] Xorg ready." >> "\$LOG"
-
-###############################################################################
-# Start X session.
-###############################################################################
-
-export DISPLAY="\$DISPLAY"
-
-startx /root/.xinitrc -- "\$DISPLAY" "\$VT" \
-    >> "\$LOG" 2>&1
-
-###############################################################################
-# Cleanup.
-###############################################################################
-
-killall matchbox-keyboard 2>/dev/null || true
-killall xterm 2>/dev/null || true
-
-kill "\$XORG_PID" 2>/dev/null || true
-
-rm -f /tmp/hd2-xorg.pid
-
-exit 0
+exec startx /root/.xinitrc -- "\$DISPLAY" "\$VT" \
+    >> /var/log/hd2-gui.log 2>&1
 EOF
 
 chmod 755 "$ROOTFS/usr/local/bin/hd2-gui"
 
 ###############################################################################
-# GUI init service
-###############################################################################
-
-echo "==> Creating GUI startup service"
-
-cat > "$ROOTFS/etc/init.d/hd2-gui" <<'EOF'
-#!/bin/sh
-
-### BEGIN INIT INFO
-# Provides:          hd2-gui
-# Required-Start:    $remote_fs $syslog
-# Required-Stop:     $remote_fs $syslog
-# Should-Start:      hd2-network
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: HTC HD2 X11 GUI
-### END INIT INFO
-
-PATH=/sbin:/bin:/usr/sbin:/usr/bin
-
-case "$1" in
-
-    start)
-
-        echo "==> Starting HTC HD2 GUI"
-
-        /usr/local/bin/hd2-gui &
-
-        ;;
-
-    stop)
-
-        echo "==> Stopping HTC HD2 GUI"
-
-        killall matchbox-keyboard 2>/dev/null || true
-        killall xterm 2>/dev/null || true
-        killall Xorg 2>/dev/null || true
-
-        rm -f /tmp/hd2-xorg.pid
-
-        ;;
-
-    restart)
-
-        "$0" stop
-
-        sleep 1
-
-        "$0" start
-
-        ;;
-
-    status)
-
-        if [ -f /tmp/hd2-xorg.pid ]; then
-
-            PID="$(cat /tmp/hd2-xorg.pid 2>/dev/null || true)"
-
-            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-                echo "HTC HD2 GUI: running"
-                exit 0
-            fi
-        fi
-
-        echo "HTC HD2 GUI: stopped"
-        exit 1
-
-        ;;
-
-    *)
-
-        echo "Usage: $0 {start|stop|restart|status}"
-        exit 1
-        ;;
-
-esac
-
-exit 0
-EOF
-
-chmod 755 "$ROOTFS/etc/init.d/hd2-gui"
-
-###############################################################################
-# Enable GUI automatically
-###############################################################################
-
-echo "==> Enabling HTC HD2 GUI at boot"
-
-chroot "$ROOTFS" \
-    update-rc.d hd2-gui defaults 99 01 || true
-
-###############################################################################
-# GUI commands
+# GUI control command
 ###############################################################################
 
 cat > "$ROOTFS/usr/local/bin/gui" <<'EOF'
@@ -1554,22 +1489,46 @@ cat > "$ROOTFS/usr/local/bin/gui" <<'EOF'
 case "${1:-status}" in
 
     start)
-        service hd2-gui start
+
+        echo "Starting HTC HD2 GUI..."
+
+        if [ -S /tmp/.X11-unix/X0 ]; then
+            echo "GUI is already running."
+            exit 0
+        fi
+
+        /usr/local/bin/hd2-gui &
         ;;
 
     stop)
-        service hd2-gui stop
+
+        echo "Stopping HTC HD2 GUI..."
+
+        killall matchbox-keyboard 2>/dev/null || true
+        killall xterm 2>/dev/null || true
+        killall Xorg 2>/dev/null || true
         ;;
 
     restart)
-        service hd2-gui restart
+
+        "$0" stop
+        sleep 2
+        "$0" start
         ;;
 
     status)
-        service hd2-gui status
+
+        if [ -S /tmp/.X11-unix/X0 ]; then
+            echo "HTC HD2 GUI: running"
+            exit 0
+        fi
+
+        echo "HTC HD2 GUI: stopped"
+        exit 1
         ;;
 
     *)
+
         echo "Usage:"
         echo "  gui start"
         echo "  gui stop"
@@ -1584,7 +1543,67 @@ EOF
 chmod 755 "$ROOTFS/usr/local/bin/gui"
 
 ###############################################################################
-# Verify installed files
+# Configure automatic GUI startup through /etc/inittab
+###############################################################################
+
+echo "==> Configuring automatic GUI startup on tty1"
+
+if [ ! -f "$ROOTFS/etc/inittab" ]; then
+
+    cat > "$ROOTFS/etc/inittab" <<'EOF'
+id:2:initdefault:
+
+si::sysinit:/etc/init.d/rcS
+
+~~:S:wait:/sbin/sulogin
+
+1:2345:respawn:/sbin/getty -L tty1 38400 linux
+2:23:respawn:/sbin/getty -L tty2 38400 linux
+3:23:respawn:/sbin/getty -L tty3 38400 linux
+4:23:respawn:/sbin/getty -L tty4 38400 linux
+EOF
+
+fi
+
+###############################################################################
+# Remove existing tty1 getty line.
+###############################################################################
+
+sed -i \
+    '/^[[:space:]]*1:[^:]*:respawn:.*getty.*tty1/d' \
+    "$ROOTFS/etc/inittab"
+
+###############################################################################
+# Add GUI tty1 line.
+###############################################################################
+
+cat >> "$ROOTFS/etc/inittab" <<'EOF'
+
+# HTC HD2 graphical terminal
+1:2345:respawn:/usr/local/bin/hd2-gui
+
+# HTC HD2 CLI fallback
+2:2345:respawn:/sbin/getty -L tty2 38400 linux
+EOF
+
+###############################################################################
+# Ensure tty3 and tty4 remain available.
+###############################################################################
+
+if ! grep -q '^3:2345:' "$ROOTFS/etc/inittab"; then
+    cat >> "$ROOTFS/etc/inittab" <<'EOF'
+3:2345:respawn:/sbin/getty -L tty3 38400 linux
+EOF
+fi
+
+if ! grep -q '^4:2345:' "$ROOTFS/etc/inittab"; then
+    cat >> "$ROOTFS/etc/inittab" <<'EOF'
+4:2345:respawn:/sbin/getty -L tty4 38400 linux
+EOF
+fi
+
+###############################################################################
+# Verify important installed files
 ###############################################################################
 
 echo
@@ -1596,18 +1615,26 @@ echo
 VERIFY_FILES=(
     "$ROOTFS/sbin/init"
     "$ROOTFS/bin/sh"
+
     "$ROOTFS/usr/local/bin/wifi"
     "$ROOTFS/usr/local/bin/netinfo"
+    "$ROOTFS/usr/local/bin/touchscreen"
     "$ROOTFS/usr/local/bin/gui"
     "$ROOTFS/usr/local/bin/hd2-gui"
+
     "$ROOTFS/etc/network/interfaces"
     "$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf"
+
     "$ROOTFS/etc/init.d/hd2-network"
-    "$ROOTFS/etc/init.d/hd2-gui"
     "$ROOTFS/etc/init.d/ssh"
+
     "$ROOTFS/etc/ssh/sshd_config"
+
     "$ROOTFS/root/.xinitrc"
+
     "$ROOTFS/etc/X11/xorg.conf.d/10-htc-hd2.conf"
+    "$ROOTFS/etc/ts.conf"
+    "$ROOTFS/etc/inittab"
 )
 
 for file in "${VERIFY_FILES[@]}"; do
@@ -1622,7 +1649,7 @@ for file in "${VERIFY_FILES[@]}"; do
 done
 
 ###############################################################################
-# Verify commands
+# Verify important commands
 ###############################################################################
 
 echo
@@ -1631,24 +1658,35 @@ echo "==> Checking important commands"
 IMPORTANT_COMMANDS=(
     /bin/sh
     /sbin/init
+
     /sbin/ifconfig
     /sbin/route
     /sbin/ip
+
     /sbin/wpa_supplicant
     /sbin/wpa_cli
     /sbin/dhclient
+
     /usr/sbin/sshd
     /usr/bin/wpa_passphrase
+
     /usr/sbin/iwlist
     /usr/bin/iwconfig
-    /usr/local/bin/wifi
-    /usr/local/bin/netinfo
-    /usr/local/bin/gui
-    /usr/local/bin/hd2-gui
+
     /usr/bin/Xorg
     /usr/bin/startx
     /usr/bin/xterm
+
     /usr/bin/matchbox-keyboard
+
+    /usr/bin/ts_calibrate
+    /usr/bin/ts_test
+
+    /usr/local/bin/wifi
+    /usr/local/bin/netinfo
+    /usr/local/bin/touchscreen
+    /usr/local/bin/gui
+    /usr/local/bin/hd2-gui
 )
 
 for file in "${IMPORTANT_COMMANDS[@]}"; do
@@ -1662,91 +1700,88 @@ for file in "${IMPORTANT_COMMANDS[@]}"; do
 done
 
 ###############################################################################
-# Verify Wi-Fi script syntax
+# Verify script syntax
 ###############################################################################
 
 echo
 echo "==> Checking Wi-Fi CLI syntax"
 
-if chroot "$ROOTFS" /bin/sh -n /usr/local/bin/wifi; then
-    echo "[ OK ] wifi script syntax"
-else
-    echo "[FAIL] wifi script syntax error"
-    exit 1
-fi
+chroot "$ROOTFS" \
+    /bin/sh -n /usr/local/bin/wifi
 
-###############################################################################
-# Verify network service syntax
-###############################################################################
+echo "[ OK ] wifi script syntax"
 
 echo
 echo "==> Checking network service syntax"
 
-if chroot "$ROOTFS" /bin/sh -n /etc/init.d/hd2-network; then
-    echo "[ OK ] hd2-network syntax"
-else
-    echo "[FAIL] hd2-network syntax error"
-    exit 1
-fi
+chroot "$ROOTFS" \
+    /bin/sh -n /etc/init.d/hd2-network
 
-###############################################################################
-# Verify GUI launcher syntax
-###############################################################################
+echo "[ OK ] hd2-network syntax"
+
+echo
+echo "==> Checking touchscreen helper syntax"
+
+chroot "$ROOTFS" \
+    /bin/sh -n /usr/local/bin/touchscreen
+
+echo "[ OK ] touchscreen script syntax"
 
 echo
 echo "==> Checking GUI launcher syntax"
 
-if chroot "$ROOTFS" /bin/sh -n /usr/local/bin/hd2-gui; then
-    echo "[ OK ] hd2-gui syntax"
+chroot "$ROOTFS" \
+    /bin/sh -n /usr/local/bin/hd2-gui
+
+echo "[ OK ] hd2-gui syntax"
+
+echo
+echo "==> Checking GUI command syntax"
+
+chroot "$ROOTFS" \
+    /bin/sh -n /usr/local/bin/gui
+
+echo "[ OK ] gui command syntax"
+
+echo
+echo "==> Checking X session syntax"
+
+chroot "$ROOTFS" \
+    /bin/sh -n /root/.xinitrc
+
+echo "[ OK ] .xinitrc syntax"
+
+###############################################################################
+# Verify inittab
+###############################################################################
+
+echo
+echo "==> Checking inittab"
+
+if grep -q '^1:2345:respawn:/usr/local/bin/hd2-gui' \
+    "$ROOTFS/etc/inittab"; then
+
+    echo "[ OK ] GUI configured on tty1"
+
 else
-    echo "[FAIL] hd2-gui syntax error"
+
+    echo "[FAIL] GUI tty1 entry missing"
+    exit 1
+fi
+
+if grep -q '^2:2345:respawn:/sbin/getty' \
+    "$ROOTFS/etc/inittab"; then
+
+    echo "[ OK ] CLI fallback configured on tty2"
+
+else
+
+    echo "[FAIL] tty2 CLI entry missing"
     exit 1
 fi
 
 ###############################################################################
-# Verify GUI init syntax
-###############################################################################
-
-echo
-echo "==> Checking GUI init syntax"
-
-if chroot "$ROOTFS" /bin/sh -n /etc/init.d/hd2-gui; then
-    echo "[ OK ] hd2-gui init syntax"
-else
-    echo "[FAIL] hd2-gui init syntax error"
-    exit 1
-fi
-
-###############################################################################
-# Verify Xinit configuration
-###############################################################################
-
-echo
-echo "==> Checking Xinit configuration"
-
-if [ -x "$ROOTFS/root/.xinitrc" ]; then
-    echo "[ OK ] /root/.xinitrc"
-else
-    echo "[FAIL] /root/.xinitrc missing"
-    exit 1
-fi
-
-###############################################################################
-# Verify architecture
-###############################################################################
-
-echo
-echo "==> Verifying Debian architecture"
-
-if [ -f "$ROOTFS/var/lib/dpkg/arch" ]; then
-
-    echo "dpkg architecture information:"
-    cat "$ROOTFS/var/lib/dpkg/arch"
-
-fi
-
-###############################################################################
-# Verify GUI package installation
+# Verify GUI packages
 ###############################################################################
 
 echo
@@ -1754,7 +1789,9 @@ echo "==> Checking GUI packages"
 
 GUI_PACKAGES=(
     xserver-xorg
-    xserver-xorg-input-tslib
+    xserver-xorg-core
+    xserver-xorg-video-fbdev
+    xserver-xorg-input-evdev
     xinit
     xterm
     matchbox-keyboard
@@ -1773,11 +1810,22 @@ for package in "${GUI_PACKAGES[@]}"; do
 
     else
 
-        echo "[WARN] Package not installed: $package"
-
+        echo "[FAIL] Package not installed: $package"
+        exit 1
     fi
 
 done
+
+###############################################################################
+# Architecture
+###############################################################################
+
+echo
+echo "==> Verifying Debian architecture"
+
+if [ -f "$ROOTFS/var/lib/dpkg/arch" ]; then
+    cat "$ROOTFS/var/lib/dpkg/arch"
+fi
 
 ###############################################################################
 # Remove QEMU
@@ -1844,21 +1892,44 @@ Distribution: Debian GNU/Linux 7 Wheezy
 Architecture: armel
 Root device: /dev/mmcblk0p2
 Init: /sbin/init
-Kernel: existing HTC HD2 kernel 2.6.32
-Boot files: existing startup.txt, zImage and initrd.gz
+
+Kernel:
+  Existing HTC HD2 kernel 2.6.32
+
+Boot files:
+  Existing startup.txt
+  Existing zImage
+  Existing initrd.gz
 
 Display:
   Resolution target: ${SCREEN_WIDTH}x${SCREEN_HEIGHT}
   X display: ${DISPLAY_NUM}
   X virtual terminal: ${X_VT}
+  Framebuffer: /dev/fb0
+  X video driver: fbdev
+  X input driver: evdev
+
+Touchscreen:
+  Kernel input device: /dev/input/eventX
+  Detection: automatic
+  tslib tools: enabled
+  Calibration command: touchscreen calibrate
+  Test command: touchscreen test
 
 GUI:
   Xorg
   xinit
   xterm
   matchbox-keyboard
-  tslib
-  GUI auto-start: enabled
+  Fullscreen terminal
+  Virtual touchscreen keyboard
+  GUI auto-start: tty1
+
+CLI:
+  tty2
+  tty3
+  tty4
+  SSH
 
 Network:
   Wi-Fi interface: $WIFI_IFACE
@@ -1874,8 +1945,10 @@ Features:
   DHCP
   SSH server
   SSH auto-start
-  USB Ethernet fallback
-  Xorg
+  USB Ethernet gadget fallback
+  Framebuffer Xorg
+  evdev touchscreen
+  tslib utilities
   Fullscreen xterm
   Virtual touchscreen keyboard
   GUI auto-start
@@ -1883,7 +1956,8 @@ Features:
 SSH:
   Root password must be configured manually using passwd.
 
-Rootfs builder: GitHub Actions
+Rootfs builder:
+  GitHub Actions
 EOF
 
 ###############################################################################
@@ -1896,59 +1970,46 @@ echo " Final rootfs verification"
 echo "============================================================"
 echo
 
-if [ ! -x "$ROOTFS/sbin/init" ]; then
-    echo "[FAIL] /sbin/init missing"
-    exit 1
-fi
+FINAL_FILES=(
+    "$ROOTFS/sbin/init"
+    "$ROOTFS/usr/local/bin/wifi"
+    "$ROOTFS/usr/local/bin/netinfo"
+    "$ROOTFS/usr/local/bin/touchscreen"
+    "$ROOTFS/usr/local/bin/gui"
+    "$ROOTFS/usr/local/bin/hd2-gui"
+    "$ROOTFS/etc/init.d/ssh"
+    "$ROOTFS/etc/init.d/hd2-network"
+    "$ROOTFS/root/.xinitrc"
+    "$ROOTFS/etc/inittab"
+    "$ROOTFS/etc/X11/xorg.conf.d/10-htc-hd2.conf"
+    "$ROOTFS/etc/ts.conf"
+    "$ROOTFS/etc/resolv.conf"
+)
 
-if [ ! -x "$ROOTFS/usr/local/bin/wifi" ]; then
-    echo "[FAIL] wifi command missing"
-    exit 1
-fi
+for file in "${FINAL_FILES[@]}"; do
 
-if [ ! -x "$ROOTFS/usr/local/bin/netinfo" ]; then
-    echo "[FAIL] netinfo command missing"
-    exit 1
-fi
+    if [ -e "$file" ]; then
+        echo "[ OK ] $file"
+    else
+        echo "[FAIL] Missing: $file"
+        exit 1
+    fi
 
-if [ ! -x "$ROOTFS/usr/local/bin/gui" ]; then
-    echo "[FAIL] gui command missing"
-    exit 1
-fi
+done
 
-if [ ! -x "$ROOTFS/usr/local/bin/hd2-gui" ]; then
-    echo "[FAIL] hd2-gui command missing"
-    exit 1
-fi
-
-if [ ! -f "$ROOTFS/etc/init.d/ssh" ]; then
-    echo "[FAIL] SSH init script missing"
-    exit 1
-fi
-
-if [ ! -f "$ROOTFS/etc/init.d/hd2-network" ]; then
-    echo "[FAIL] hd2-network init script missing"
-    exit 1
-fi
-
-if [ ! -f "$ROOTFS/etc/init.d/hd2-gui" ]; then
-    echo "[FAIL] hd2-gui init script missing"
-    exit 1
-fi
-
-if [ ! -f "$ROOTFS/root/.xinitrc" ]; then
-    echo "[FAIL] .xinitrc missing"
-    exit 1
-fi
-
+echo
 echo "[ OK ] /sbin/init"
 echo "[ OK ] Wi-Fi CLI"
 echo "[ OK ] Network service"
 echo "[ OK ] SSH"
 echo "[ OK ] Xorg"
+echo "[ OK ] fbdev"
+echo "[ OK ] evdev touchscreen"
+echo "[ OK ] tslib tools"
 echo "[ OK ] xterm"
 echo "[ OK ] matchbox-keyboard"
-echo "[ OK ] GUI auto-start"
+echo "[ OK ] GUI auto-start on tty1"
+echo "[ OK ] CLI fallback on tty2"
 echo "[ OK ] DNS configuration"
 
 ###############################################################################
@@ -1988,10 +2049,19 @@ echo "  /sbin/init"
 echo
 
 echo "GUI:"
-echo "  Xorg"
+echo "  Xorg + fbdev"
 echo "  xterm fullscreen"
+echo "  evdev touchscreen"
 echo "  matchbox-keyboard"
 echo "  Auto-start: YES"
+echo "  tty1: GUI"
+echo "  tty2: CLI"
+echo
+
+echo "Touchscreen:"
+echo "  touchscreen info"
+echo "  touchscreen test"
+echo "  touchscreen calibrate"
 echo
 
 echo "Wi-Fi:"
@@ -2019,7 +2089,7 @@ echo "  service ssh start"
 echo "  service ssh status"
 echo
 
-echo "USB fallback:"
+echo "USB Ethernet gadget:"
 echo "  $USB_IP"
 echo
 
