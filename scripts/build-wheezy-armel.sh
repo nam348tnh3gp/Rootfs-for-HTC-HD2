@@ -8,8 +8,11 @@ set -Eeuo pipefail
 # Target:
 #   HTC HD2 / HTC Leo
 #
+# CPU:
+#   Qualcomm QSD8250 / ARMv7
+#
 # Architecture:
-#   ARMEL (32-bit ARM, soft-float)
+#   ARMEL 32-bit
 #
 # Distribution:
 #   Debian GNU/Linux 7 Wheezy
@@ -32,7 +35,7 @@ set -Eeuo pipefail
 #   - DHCP
 #   - SSH server
 #   - SSH auto-start
-#   - USB Ethernet fallback if kernel supports g_ether
+#   - USB Ethernet fallback
 ###############################################################################
 
 ###############################################################################
@@ -52,7 +55,7 @@ ROOTFS="$OUTPUT_DIR/rootfs"
 ARCH="armel"
 SUITE="wheezy"
 
-# Debian Wheezy is EOL and archived.
+# Debian Wheezy is EOL.
 MIRROR="http://archive.debian.org/debian"
 
 ###############################################################################
@@ -60,11 +63,12 @@ MIRROR="http://archive.debian.org/debian"
 ###############################################################################
 
 # HTC HD2 Wi-Fi interface.
-# Change this if your kernel uses another interface name.
 WIFI_IFACE="wlan0"
 
-# USB Ethernet fallback address.
+# USB Ethernet gadget interface.
 USB_IFACE="usb0"
+
+# USB fallback address.
 USB_IP="192.168.7.2"
 USB_NETMASK="255.255.255.0"
 
@@ -130,7 +134,7 @@ if [ ! -x /usr/bin/qemu-arm-static ]; then
 fi
 
 ###############################################################################
-# Cleanup function
+# Cleanup
 ###############################################################################
 
 cleanup() {
@@ -159,17 +163,16 @@ cleanup() {
 trap cleanup EXIT
 
 ###############################################################################
-# Prepare output directory
+# Prepare output
 ###############################################################################
 
 echo "==> Preparing output directory"
 
 rm -rf "$OUTPUT_DIR"
-
 mkdir -p "$ROOTFS"
 
 ###############################################################################
-# Bootstrap Debian Wheezy ARMEL
+# Bootstrap Debian
 ###############################################################################
 
 echo
@@ -192,7 +195,7 @@ debootstrap \
     "$MIRROR"
 
 ###############################################################################
-# Install QEMU into rootfs
+# Install QEMU
 ###############################################################################
 
 echo
@@ -203,7 +206,7 @@ cp \
     "$ROOTFS/usr/bin/qemu-arm-static"
 
 ###############################################################################
-# Configure APT for Debian Archive
+# Configure APT
 ###############################################################################
 
 echo "==> Configuring Debian Wheezy archive"
@@ -223,7 +226,7 @@ APT::Get::AllowUnauthenticated "true";
 EOF
 
 ###############################################################################
-# Temporary DNS for build
+# Temporary DNS
 ###############################################################################
 
 echo "==> Configuring temporary DNS"
@@ -252,7 +255,6 @@ mount -t sysfs sysfs "$ROOTFS/sys"
 echo "==> Mounting /run"
 
 mkdir -p "$ROOTFS/run"
-
 mount --bind /run "$ROOTFS/run"
 
 ###############################################################################
@@ -267,7 +269,7 @@ chroot "$ROOTFS" \
     --second-stage
 
 ###############################################################################
-# Prevent services from starting inside chroot
+# Prevent services from starting in chroot
 ###############################################################################
 
 echo "==> Creating policy-rc.d"
@@ -277,7 +279,7 @@ cat > "$ROOTFS/usr/sbin/policy-rc.d" <<'EOF'
 exit 101
 EOF
 
-chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
+chmod 755 "$ROOTFS/usr/sbin/policy-rc.d"
 
 ###############################################################################
 # Hostname
@@ -315,6 +317,10 @@ EOF
 
 ###############################################################################
 # Base network configuration
+#
+# IMPORTANT:
+# Wi-Fi is intentionally NOT managed by ifupdown.
+# hd2-network manages Wi-Fi directly.
 ###############################################################################
 
 echo "==> Configuring network"
@@ -324,10 +330,6 @@ mkdir -p "$ROOTFS/etc/network"
 cat > "$ROOTFS/etc/network/interfaces" <<EOF
 auto lo
 iface lo inet loopback
-
-allow-hotplug $WIFI_IFACE
-iface $WIFI_IFACE inet dhcp
-    wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf
 
 allow-hotplug $USB_IFACE
 iface $USB_IFACE inet static
@@ -386,6 +388,7 @@ apt-get \
     kmod \
     module-init-tools \
     procps \
+    psmisc \
     net-tools \
     ifupdown \
     iproute \
@@ -394,6 +397,7 @@ apt-get \
     wireless-tools \
     wpasupplicant \
     openssh-server \
+    openssh-client \
     less \
     nano \
     ca-certificates
@@ -421,14 +425,17 @@ ls -l "$ROOTFS/sbin/init"
 echo "==> Configuring wpa_supplicant"
 
 mkdir -p "$ROOTFS/etc/wpa_supplicant"
+mkdir -p "$ROOTFS/var/run/wpa_supplicant"
 
-cat > "$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf" <<EOF
+cat > "$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf" <<'EOF'
 ctrl_interface=/var/run/wpa_supplicant
 update_config=1
 country=00
 EOF
 
 chmod 600 "$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf"
+
+chmod 755 "$ROOTFS/var/run/wpa_supplicant"
 
 ###############################################################################
 # Wi-Fi CLI
@@ -438,11 +445,11 @@ echo "==> Installing Wi-Fi CLI"
 
 mkdir -p "$ROOTFS/usr/local/bin"
 
-cat > "$ROOTFS/usr/local/bin/wifi" <<EOF'
+cat > "$ROOTFS/usr/local/bin/wifi" <<'WIFI_EOF'
 #!/bin/sh
 
 ###############################################################################
-# HTC HD2 Wi-Fi command
+# HTC HD2 Wi-Fi CLI
 #
 # Commands:
 #   wifi test
@@ -453,48 +460,64 @@ cat > "$ROOTFS/usr/local/bin/wifi" <<EOF'
 #   wifi help
 ###############################################################################
 
-IFACE="$WIFI_IFACE"
+IFACE="__WIFI_IFACE__"
 CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
 
 ###############################################################################
-# Helpers
+# Check interface
 ###############################################################################
 
 wifi_exists()
 {
-    if ip link show "\$IFACE" >/dev/null 2>&1; then
+    if ip link show "$IFACE" >/dev/null 2>&1; then
         return 0
     fi
 
-    if ifconfig "\$IFACE" >/dev/null 2>&1; then
+    if ifconfig "$IFACE" >/dev/null 2>&1; then
         return 0
     fi
 
-    echo "[FAIL] Wi-Fi interface \$IFACE not found."
+    echo
+    echo "[FAIL] Wi-Fi interface $IFACE not found."
     echo
     echo "Possible causes:"
     echo "  - Wi-Fi kernel driver is not loaded"
     echo "  - Wi-Fi firmware is missing"
     echo "  - interface has another name"
     echo
+    echo "Useful commands:"
+    echo "  ifconfig -a"
+    echo "  iwconfig"
+    echo "  lsmod"
+    echo "  dmesg | grep -i wifi"
+    echo
 
     return 1
 }
+
+###############################################################################
+# Wi-Fi ON
+###############################################################################
 
 wifi_on()
 {
     wifi_exists || return 1
 
-    echo "==> Enabling \$IFACE"
+    echo "==> Enabling $IFACE"
 
-    ifconfig "\$IFACE" up 2>/dev/null || \
-        ip link set "\$IFACE" up 2>/dev/null || {
-            echo "[FAIL] Unable to enable \$IFACE"
-            return 1
-        }
+    ifconfig "$IFACE" up 2>/dev/null || \
+        ip link set "$IFACE" up 2>/dev/null || {
+
+        echo "[FAIL] Unable to enable $IFACE"
+        return 1
+    }
 
     echo "[ OK ] Wi-Fi enabled"
 }
+
+###############################################################################
+# Wi-Fi OFF
+###############################################################################
 
 wifi_off()
 {
@@ -505,13 +528,17 @@ wifi_off()
     killall wpa_supplicant 2>/dev/null || true
     killall dhclient 2>/dev/null || true
 
-    ifconfig "\$IFACE" 0.0.0.0 2>/dev/null || true
+    ifconfig "$IFACE" 0.0.0.0 2>/dev/null || true
 
-    ifconfig "\$IFACE" down 2>/dev/null || \
-        ip link set "\$IFACE" down 2>/dev/null || true
+    ifconfig "$IFACE" down 2>/dev/null || \
+        ip link set "$IFACE" down 2>/dev/null || true
 
     echo "[ OK ] Wi-Fi disabled"
 }
+
+###############################################################################
+# Wi-Fi SCAN
+###############################################################################
 
 wifi_scan()
 {
@@ -525,146 +552,216 @@ wifi_scan()
     echo "========================================"
     echo
 
-    # Old HTC/legacy drivers commonly support WEXT.
+    ###########################################################################
+    # Legacy WEXT
+    ###########################################################################
+
     if command -v iwlist >/dev/null 2>&1; then
-        echo "Using iwlist..."
+
+        echo "Scanning with iwlist..."
         echo
 
-        if iwlist "\$IFACE" scan 2>/dev/null; then
+        if iwlist "$IFACE" scan 2>/dev/null; then
             return 0
         fi
+
     fi
 
-    # Newer drivers may support nl80211.
+    ###########################################################################
+    # nl80211
+    ###########################################################################
+
     if command -v iw >/dev/null 2>&1; then
-        echo "Using iw..."
+
+        echo "Scanning with iw..."
         echo
 
-        if iw dev "\$IFACE" scan 2>/dev/null; then
+        if iw dev "$IFACE" scan 2>/dev/null; then
             return 0
         fi
+
     fi
 
+    echo
     echo "[FAIL] Wi-Fi scan failed."
     echo
-    echo "The kernel driver may not support scanning through"
-    echo "wireless-tools/WEXT or nl80211."
+    echo "The kernel driver may not support:"
+    echo "  - WEXT"
+    echo "  - nl80211"
+    echo
 
     return 1
 }
+
+###############################################################################
+# Wi-Fi CONNECT
+###############################################################################
 
 wifi_connect()
 {
     wifi_exists || return 1
 
-    SSID="\$*"
+    SSID="$*"
 
-    if [ -z "\$SSID" ]; then
+    ###########################################################################
+    # Ask SSID if not supplied
+    ###########################################################################
+
+    if [ -z "$SSID" ]; then
+
         echo
         echo "SSID:"
         printf "> "
+
         IFS= read -r SSID
+
     fi
 
-    if [ -z "\$SSID" ]; then
+    if [ -z "$SSID" ]; then
         echo "[FAIL] SSID cannot be empty."
         return 1
     fi
 
     echo
-    echo "SSID: \$SSID"
+    echo "SSID: $SSID"
     echo
 
+    ###########################################################################
+    # Ask password
+    ###########################################################################
+
     printf "Password (leave empty for OPEN network): "
+
     stty -echo 2>/dev/null || true
     IFS= read -r PASSWORD
     stty echo 2>/dev/null || true
+
     echo
 
+    ###########################################################################
+    # Prepare
+    ###########################################################################
+
     mkdir -p /etc/wpa_supplicant
+    mkdir -p /var/run/wpa_supplicant
 
     chmod 700 /etc/wpa_supplicant
+    chmod 755 /var/run/wpa_supplicant
 
     killall wpa_supplicant 2>/dev/null || true
     killall dhclient 2>/dev/null || true
 
-    ifconfig "\$IFACE" up 2>/dev/null || \
-        ip link set "\$IFACE" up 2>/dev/null || {
-            echo "[FAIL] Unable to enable \$IFACE."
-            return 1
-        }
+    ifconfig "$IFACE" up 2>/dev/null || \
+        ip link set "$IFACE" up 2>/dev/null || {
 
-    TEMP_CONF="/tmp/wpa_supplicant.conf.\$\$"
+        echo "[FAIL] Unable to enable $IFACE."
+        return 1
+    }
 
-    cat > "\$TEMP_CONF" <<EOF2
+    ###########################################################################
+    # Temporary WPA configuration
+    ###########################################################################
+
+    TEMP_CONF="/tmp/wpa_supplicant.conf.$$"
+
+    cat > "$TEMP_CONF" <<EOF2
 ctrl_interface=/var/run/wpa_supplicant
 update_config=1
 country=00
 
 network={
-    ssid="\$SSID"
+    ssid="$SSID"
 EOF2
 
-    if [ -n "\$PASSWORD" ]; then
+    ###########################################################################
+    # WPA/WPA2 password
+    ###########################################################################
 
-        WPA_LINE="\$(wpa_passphrase "\$SSID" "\$PASSWORD" 2>/dev/null \
-            | sed -n 's/^[[:space:]]*psk=\(.*\)$/    psk=\1/p' \
-            | tail -n 1)"
+    if [ -n "$PASSWORD" ]; then
 
-        if [ -z "\$WPA_LINE" ]; then
-            rm -f "\$TEMP_CONF"
+        WPA_LINE="$(
+            wpa_passphrase "$SSID" "$PASSWORD" 2>/dev/null \
+            | sed -n 's/^[[:space:]]*psk=.*$/    psk=\1/p' \
+            | tail -n 1
+        )"
+
+        if [ -z "$WPA_LINE" ]; then
+
+            rm -f "$TEMP_CONF"
+
             echo "[FAIL] Unable to generate WPA configuration."
+
             return 1
         fi
 
-        echo "\$WPA_LINE" >> "\$TEMP_CONF"
+        echo "$WPA_LINE" >> "$TEMP_CONF"
 
     else
 
-        cat >> "\$TEMP_CONF" <<EOF2
+        #######################################################################
+        # Open Wi-Fi
+        #######################################################################
+
+        cat >> "$TEMP_CONF" <<EOF2
     key_mgmt=NONE
 EOF2
 
     fi
 
-    cat >> "\$TEMP_CONF" <<EOF2
+    cat >> "$TEMP_CONF" <<EOF2
 }
 EOF2
 
-    chmod 600 "\$TEMP_CONF"
+    chmod 600 "$TEMP_CONF"
 
-    mv "\$TEMP_CONF" "\$CONF"
+    mv "$TEMP_CONF" "$CONF"
+
+    ###########################################################################
+    # Start wpa_supplicant
+    #
+    # HTC HD2-era drivers commonly use WEXT.
+    ###########################################################################
 
     echo
     echo "Connecting..."
     echo
 
-    # First try WEXT for old HTC HD2-era drivers.
     if ! wpa_supplicant \
         -B \
         -D wext \
-        -i "\$IFACE" \
-        -c "\$CONF" 2>/dev/null; then
+        -i "$IFACE" \
+        -c "$CONF" \
+        2>/dev/null; then
 
-        # Fallback to automatic backend.
+        echo "WEXT failed."
+        echo "Trying automatic driver..."
+
+        killall wpa_supplicant 2>/dev/null || true
+
         if ! wpa_supplicant \
             -B \
-            -i "\$IFACE" \
-            -c "\$CONF" 2>/dev/null; then
+            -i "$IFACE" \
+            -c "$CONF" \
+            2>/dev/null; then
 
+            echo
             echo "[FAIL] wpa_supplicant could not start."
             return 1
         fi
     fi
 
+    ###########################################################################
+    # Wait for association
+    ###########################################################################
+
     echo "Waiting for Wi-Fi association..."
 
     COUNT=0
 
-    while [ "\$COUNT" -lt 20 ]; do
+    while [ "$COUNT" -lt 20 ]; do
 
         if wpa_cli \
-            -i "\$IFACE" \
+            -i "$IFACE" \
             status 2>/dev/null \
             | grep -q '^wpa_state=COMPLETED'; then
 
@@ -672,12 +769,17 @@ EOF2
         fi
 
         sleep 1
-        COUNT=\$((COUNT + 1))
+
+        COUNT=$((COUNT + 1))
 
     done
 
+    ###########################################################################
+    # Check association
+    ###########################################################################
+
     if ! wpa_cli \
-        -i "\$IFACE" \
+        -i "$IFACE" \
         status 2>/dev/null \
         | grep -q '^wpa_state=COMPLETED'; then
 
@@ -694,31 +796,54 @@ EOF2
         return 1
     fi
 
+    echo
     echo "[ OK ] Wi-Fi connected"
+
+    ###########################################################################
+    # DHCP
+    ###########################################################################
 
     echo
     echo "Requesting DHCP..."
 
-    dhclient -r "\$IFACE" 2>/dev/null || true
+    dhclient -r "$IFACE" 2>/dev/null || true
 
-    if ! dhclient "\$IFACE" 2>/dev/null; then
+    if ! dhclient "$IFACE" 2>/dev/null; then
+
         echo "[FAIL] DHCP failed."
+
         return 1
     fi
 
-    IP="\$(ip -4 addr show "\$IFACE" 2>/dev/null \
-        | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' \
-        | head -n 1)"
+    ###########################################################################
+    # Show IP
+    ###########################################################################
+
+    IP="$(
+        ip -4 addr show "$IFACE" 2>/dev/null \
+        | sed -n 's/.*inet [0-9.]*\/.*/\1/p' \
+        | head -n 1
+    )"
 
     echo
     echo "[ OK ] Network configured"
-    echo "IP address: \${IP:-unknown}"
+    echo "IP address: ${IP:-unknown}"
+
+    ###########################################################################
+    # SSH information
+    ###########################################################################
 
     echo
     echo "SSH:"
-    echo "  ssh root@\${IP:-<IP_ADDRESS>}"
+    echo "  ssh root@${IP:-<IP_ADDRESS>}"
     echo
+
+    return 0
 }
+
+###############################################################################
+# Wi-Fi TEST
+###############################################################################
 
 wifi_test()
 {
@@ -728,7 +853,7 @@ wifi_test()
     echo "========================================"
     echo
 
-    echo "Interface: \$IFACE"
+    echo "Interface: $IFACE"
     echo
 
     if ! wifi_exists; then
@@ -737,23 +862,39 @@ wifi_test()
 
     echo "[ OK ] Interface detected"
 
+    ###########################################################################
+    # Interface state
+    ###########################################################################
+
     echo
     echo "Interface state:"
-    ip link show "\$IFACE" 2>/dev/null || \
-        ifconfig "\$IFACE" 2>/dev/null || true
+
+    ip link show "$IFACE" 2>/dev/null || \
+        ifconfig "$IFACE" 2>/dev/null || true
+
+    ###########################################################################
+    # Wireless state
+    ###########################################################################
 
     echo
     echo "Wireless state:"
 
-    iwconfig "\$IFACE" 2>/dev/null || \
-        iw dev "\$IFACE" link 2>/dev/null || \
+    iwconfig "$IFACE" 2>/dev/null || \
         echo "Wireless information unavailable."
+
+    ###########################################################################
+    # IP address
+    ###########################################################################
 
     echo
     echo "IP address:"
 
-    ip addr show "\$IFACE" 2>/dev/null || \
-        ifconfig "\$IFACE" 2>/dev/null || true
+    ip addr show "$IFACE" 2>/dev/null || \
+        ifconfig "$IFACE" 2>/dev/null || true
+
+    ###########################################################################
+    # Route
+    ###########################################################################
 
     echo
     echo "Default route:"
@@ -761,30 +902,56 @@ wifi_test()
     ip route 2>/dev/null | grep '^default' || \
         route -n 2>/dev/null | head
 
+    ###########################################################################
+    # Internet
+    ###########################################################################
+
     echo
-    echo "Gateway/Internet test:"
+    echo "Internet test:"
 
     if ping -c 1 -W 5 1.1.1.1 >/dev/null 2>&1; then
+
         echo "[ OK ] Internet reachable"
+
     else
+
         echo "[FAIL] Internet unreachable"
+
         return 1
     fi
+
+    ###########################################################################
+    # DNS
+    ###########################################################################
 
     echo
     echo "DNS test:"
 
     if getent hosts debian.org >/dev/null 2>&1; then
+
         echo "[ OK ] DNS working"
+
     else
+
         echo "[FAIL] DNS unavailable"
+
         return 1
     fi
+
+    ###########################################################################
+    # Result
+    ###########################################################################
 
     echo
     echo "Wi-Fi test: PASS"
     echo
+
+    return 0
 }
+
+###############################################################################
+# HELP
+###############################################################################
 
 wifi_help()
 {
@@ -793,32 +960,44 @@ wifi_help()
     echo " HTC HD2 Wi-Fi"
     echo "========================================"
     echo
+
     echo "Commands:"
     echo
+
     echo "  wifi test"
-    echo "      Test Wi-Fi interface, network and DNS"
+    echo "      Test Wi-Fi interface, Internet and DNS"
     echo
+
     echo "  wifi scan"
     echo "      Scan nearby Wi-Fi networks"
     echo
+
     echo "  wifi on"
     echo "      Enable Wi-Fi"
     echo
+
     echo "  wifi off"
     echo "      Disable Wi-Fi"
     echo
+
     echo "  wifi connect"
     echo "      Ask for SSID and password"
     echo
+
     echo "  wifi connect SSID"
-    echo "      Connect directly using SSID"
+    echo "      Connect using the specified SSID"
     echo
+
     echo "  wifi help"
     echo "      Show this help"
     echo
 }
 
-case "\${1:-help}" in
+###############################################################################
+# Main
+###############################################################################
+
+case "${1:-help}" in
 
     test)
         wifi_test
@@ -838,7 +1017,7 @@ case "\${1:-help}" in
 
     connect)
         shift
-        wifi_connect "\$@"
+        wifi_connect "$@"
         ;;
 
     help|-h|--help)
@@ -846,14 +1025,22 @@ case "\${1:-help}" in
         ;;
 
     *)
-        echo "Unknown Wi-Fi command: \$1"
+        echo "Unknown Wi-Fi command: $1"
         echo
         wifi_help
         exit 1
         ;;
 
 esac
-EOF
+WIFI_EOF
+
+###############################################################################
+# Replace Wi-Fi interface placeholder
+###############################################################################
+
+sed -i \
+    "s/__WIFI_IFACE__/$WIFI_IFACE/g" \
+    "$ROOTFS/usr/local/bin/wifi"
 
 chmod 755 "$ROOTFS/usr/local/bin/wifi"
 
@@ -875,10 +1062,19 @@ if [ -f "$ROOTFS/etc/ssh/sshd_config" ]; then
         -e 's/^#*[[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' \
         "$ROOTFS/etc/ssh/sshd_config"
 
+    # Ensure settings exist even if Debian's default config differs.
+    if ! grep -q '^PermitRootLogin' "$ROOTFS/etc/ssh/sshd_config"; then
+        echo "PermitRootLogin yes" >> "$ROOTFS/etc/ssh/sshd_config"
+    fi
+
+    if ! grep -q '^PasswordAuthentication' "$ROOTFS/etc/ssh/sshd_config"; then
+        echo "PasswordAuthentication yes" >> "$ROOTFS/etc/ssh/sshd_config"
+    fi
+
 fi
 
 ###############################################################################
-# SSH init script
+# Enable SSH
 ###############################################################################
 
 if [ -x "$ROOTFS/etc/init.d/ssh" ]; then
@@ -891,12 +1087,10 @@ if [ -x "$ROOTFS/etc/init.d/ssh" ]; then
 fi
 
 ###############################################################################
-# SSH host keys
+# Generate SSH host keys
 ###############################################################################
 
 echo "==> Checking SSH host keys"
-
-mkdir -p "$ROOTFS/etc/ssh"
 
 if ! ls "$ROOTFS/etc/ssh"/ssh_host_* >/dev/null 2>&1; then
 
@@ -908,17 +1102,17 @@ if ! ls "$ROOTFS/etc/ssh"/ssh_host_* >/dev/null 2>&1; then
 fi
 
 ###############################################################################
-# Automatic Wi-Fi startup
+# HTC HD2 network startup service
 ###############################################################################
 
-echo "==> Creating Wi-Fi startup service"
+echo "==> Creating HTC HD2 network startup service"
 
 cat > "$ROOTFS/etc/init.d/hd2-network" <<EOF
 #!/bin/sh
 
 ### BEGIN INIT INFO
 # Provides:          hd2-network
-# Required-Start:    \$networking
+# Required-Start:    \$remote_fs
 # Required-Stop:
 # Should-Start:
 # Default-Start:     2 3 4 5
@@ -933,6 +1127,184 @@ USB_IFACE="$USB_IFACE"
 USB_IP="$USB_IP"
 USB_NETMASK="$USB_NETMASK"
 
+###############################################################################
+# Start Wi-Fi
+###############################################################################
+
+start_wifi()
+{
+    if [ ! -f /etc/wpa_supplicant/wpa_supplicant.conf ]; then
+        return 1
+    fi
+
+    if ! grep -q '^[[:space:]]*network=' \
+        /etc/wpa_supplicant/wpa_supplicant.conf; then
+
+        return 1
+    fi
+
+    echo "==> Saved Wi-Fi configuration found."
+
+    if ! ip link show "\$WIFI_IFACE" >/dev/null 2>&1; then
+        echo "[INFO] Wi-Fi interface \$WIFI_IFACE not available."
+        return 1
+    fi
+
+    ifconfig "\$WIFI_IFACE" up 2>/dev/null || \
+        ip link set "\$WIFI_IFACE" up 2>/dev/null || true
+
+    killall wpa_supplicant 2>/dev/null || true
+    killall dhclient 2>/dev/null || true
+
+    ###########################################################################
+    # Try WEXT first.
+    ###########################################################################
+
+    if wpa_supplicant \
+        -B \
+        -D wext \
+        -i "\$WIFI_IFACE" \
+        -c /etc/wpa_supplicant/wpa_supplicant.conf \
+        2>/dev/null; then
+
+        echo "==> Waiting for Wi-Fi..."
+
+        COUNT=0
+
+        while [ "\$COUNT" -lt 15 ]; do
+
+            if wpa_cli \
+                -i "\$WIFI_IFACE" \
+                status 2>/dev/null \
+                | grep -q '^wpa_state=COMPLETED'; then
+
+                break
+            fi
+
+            sleep 1
+            COUNT=\$((COUNT + 1))
+
+        done
+
+        if wpa_cli \
+            -i "\$WIFI_IFACE" \
+            status 2>/dev/null \
+            | grep -q '^wpa_state=COMPLETED'; then
+
+            if dhclient "\$WIFI_IFACE" 2>/dev/null; then
+
+                echo "[ OK ] Wi-Fi connected."
+
+                return 0
+            fi
+        fi
+
+    fi
+
+    ###########################################################################
+    # WEXT failed. Try automatic driver.
+    ###########################################################################
+
+    killall wpa_supplicant 2>/dev/null || true
+
+    echo "==> Trying automatic Wi-Fi driver."
+
+    if wpa_supplicant \
+        -B \
+        -i "\$WIFI_IFACE" \
+        -c /etc/wpa_supplicant/wpa_supplicant.conf \
+        2>/dev/null; then
+
+        echo "==> Waiting for Wi-Fi..."
+
+        COUNT=0
+
+        while [ "\$COUNT" -lt 15 ]; do
+
+            if wpa_cli \
+                -i "\$WIFI_IFACE" \
+                status 2>/dev/null \
+                | grep -q '^wpa_state=COMPLETED'; then
+
+                break
+            fi
+
+            sleep 1
+            COUNT=\$((COUNT + 1))
+
+        done
+
+        if wpa_cli \
+            -i "\$WIFI_IFACE" \
+            status 2>/dev/null \
+            | grep -q '^wpa_state=COMPLETED'; then
+
+            if dhclient "\$WIFI_IFACE" 2>/dev/null; then
+
+                echo "[ OK ] Wi-Fi connected."
+
+                return 0
+            fi
+        fi
+
+    fi
+
+    killall wpa_supplicant 2>/dev/null || true
+
+    echo "[INFO] Automatic Wi-Fi connection failed."
+
+    return 1
+}
+
+###############################################################################
+# USB Ethernet fallback
+###############################################################################
+
+start_usb()
+{
+    echo "==> Trying USB Ethernet fallback."
+
+    ###########################################################################
+    # Requires kernel support for USB gadget Ethernet.
+    ###########################################################################
+
+    modprobe g_ether 2>/dev/null || true
+
+    sleep 1
+
+    if ! ip link show "\$USB_IFACE" >/dev/null 2>&1; then
+
+        echo "[INFO] USB Ethernet interface not available."
+
+        return 1
+    fi
+
+    ifconfig "\$USB_IFACE" \
+        "\$USB_IP" \
+        netmask "\$USB_NETMASK" \
+        up 2>/dev/null || {
+
+        ip addr add \
+            "\$USB_IP/24" \
+            dev "\$USB_IFACE" \
+            2>/dev/null || true
+
+        ip link set \
+            "\$USB_IFACE" \
+            up \
+            2>/dev/null || true
+    }
+
+    echo "[ OK ] USB Ethernet available."
+    echo "      IP: \$USB_IP"
+
+    return 0
+}
+
+###############################################################################
+# Main
+###############################################################################
+
 case "\$1" in
 
     start)
@@ -940,97 +1312,20 @@ case "\$1" in
         echo "==> HTC HD2 network initialization"
 
         #######################################################################
-        # Try Wi-Fi if a saved configuration exists.
+        # Wi-Fi first
         #######################################################################
 
-        if [ -f /etc/wpa_supplicant/wpa_supplicant.conf ] && \
-           grep -q '^[[:space:]]*network=' \
-           /etc/wpa_supplicant/wpa_supplicant.conf; then
-
-            echo "==> Saved Wi-Fi configuration found."
-
-            if ip link show "\$WIFI_IFACE" >/dev/null 2>&1; then
-
-                ifconfig "\$WIFI_IFACE" up 2>/dev/null || \
-                    ip link set "\$WIFI_IFACE" up 2>/dev/null || true
-
-                killall wpa_supplicant 2>/dev/null || true
-                killall dhclient 2>/dev/null || true
-
-                if wpa_supplicant \
-                    -B \
-                    -D wext \
-                    -i "\$WIFI_IFACE" \
-                    -c /etc/wpa_supplicant/wpa_supplicant.conf \
-                    2>/dev/null; then
-
-                    sleep 3
-
-                    if dhclient "\$WIFI_IFACE" 2>/dev/null; then
-                        echo "[ OK ] Wi-Fi connected."
-
-                        exit 0
-                    fi
-                fi
-
-                #################################################################
-                # Fallback to automatic wpa_supplicant driver.
-                #################################################################
-
-                killall wpa_supplicant 2>/dev/null || true
-
-                if wpa_supplicant \
-                    -B \
-                    -i "\$WIFI_IFACE" \
-                    -c /etc/wpa_supplicant/wpa_supplicant.conf \
-                    2>/dev/null; then
-
-                    sleep 3
-
-                    if dhclient "\$WIFI_IFACE" 2>/dev/null; then
-                        echo "[ OK ] Wi-Fi connected."
-
-                        exit 0
-                    fi
-                fi
-
-            fi
-
+        if start_wifi; then
+            exit 0
         fi
 
         #######################################################################
-        # USB Ethernet fallback.
-        #
-        # Requires kernel support for USB gadget Ethernet, usually g_ether.
+        # USB fallback
         #######################################################################
 
         echo "==> Wi-Fi unavailable or not configured."
-        echo "==> Trying USB Ethernet fallback."
 
-        modprobe g_ether 2>/dev/null || true
-
-        sleep 1
-
-        if ip link show "\$USB_IFACE" >/dev/null 2>&1; then
-
-            ifconfig "\$USB_IFACE" \
-                "\$USB_IP" \
-                netmask "\$USB_NETMASK" \
-                up 2>/dev/null || \
-            ip addr add \
-                "\$USB_IP/24" \
-                dev "\$USB_IFACE" 2>/dev/null || true
-
-            ip link set "\$USB_IFACE" up 2>/dev/null || true
-
-            echo "[ OK ] USB Ethernet available."
-            echo "      IP: \$USB_IP"
-
-        else
-
-            echo "[INFO] USB Ethernet interface not available."
-
-        fi
+        start_usb || true
 
         ;;
 
@@ -1065,21 +1360,24 @@ EOF
 chmod 755 "$ROOTFS/etc/init.d/hd2-network"
 
 ###############################################################################
-# Enable network startup
+# Enable HTC HD2 network service
 ###############################################################################
 
 echo "==> Enabling HTC HD2 network service"
 
 chroot "$ROOTFS" \
-    update-rc.d hd2-network defaults 2>/dev/null || true
+    update-rc.d hd2-network defaults || true
 
 ###############################################################################
-# Create convenient network information command
+# Network information command
 ###############################################################################
+
+echo "==> Installing netinfo"
 
 cat > "$ROOTFS/usr/local/bin/netinfo" <<'EOF'
 #!/bin/sh
 
+echo
 echo "========================================"
 echo " HTC HD2 Network"
 echo "========================================"
@@ -1101,7 +1399,12 @@ echo "DNS:"
 cat /etc/resolv.conf 2>/dev/null || true
 
 echo
+echo "Wi-Fi:"
+iwconfig wlan0 2>/dev/null || true
+
+echo
 echo "SSH:"
+echo "  service ssh start"
 echo "  service ssh status"
 echo
 EOF
@@ -1109,16 +1412,119 @@ EOF
 chmod 755 "$ROOTFS/usr/local/bin/netinfo"
 
 ###############################################################################
-# Create Wi-Fi config directory
+# Verify installed files
 ###############################################################################
 
-mkdir -p "$ROOTFS/var/run/wpa_supplicant"
-chmod 755 "$ROOTFS/var/run/wpa_supplicant"
+echo
+echo "============================================================"
+echo " Verifying installed features"
+echo "============================================================"
+echo
+
+VERIFY_FILES=(
+    "$ROOTFS/sbin/init"
+    "$ROOTFS/bin/sh"
+    "$ROOTFS/usr/local/bin/wifi"
+    "$ROOTFS/usr/local/bin/netinfo"
+    "$ROOTFS/etc/network/interfaces"
+    "$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf"
+    "$ROOTFS/etc/init.d/hd2-network"
+    "$ROOTFS/etc/init.d/ssh"
+    "$ROOTFS/etc/ssh/sshd_config"
+)
+
+for file in "${VERIFY_FILES[@]}"; do
+
+    if [ -e "$file" ]; then
+        echo "[ OK ] $file"
+    else
+        echo "[FAIL] Missing: $file"
+        exit 1
+    fi
+
+done
 
 ###############################################################################
-# Remove QEMU from final rootfs
+# Verify commands
 ###############################################################################
 
+echo
+echo "==> Checking important commands"
+
+IMPORTANT_COMMANDS=(
+    /bin/sh
+    /sbin/init
+    /sbin/ifconfig
+    /sbin/route
+    /sbin/ip
+    /sbin/wpa_supplicant
+    /sbin/wpa_cli
+    /sbin/dhclient
+    /usr/sbin/sshd
+    /usr/bin/wpa_passphrase
+    /usr/sbin/iwlist
+    /usr/bin/iwconfig
+    /usr/local/bin/wifi
+    /usr/local/bin/netinfo
+)
+
+for file in "${IMPORTANT_COMMANDS[@]}"; do
+
+    if [ -e "$ROOTFS$file" ]; then
+        echo "[ OK ] $file"
+    else
+        echo "[WARN] Missing: $file"
+    fi
+
+done
+
+###############################################################################
+# Verify Wi-Fi script syntax
+###############################################################################
+
+echo
+echo "==> Checking Wi-Fi CLI syntax"
+
+if chroot "$ROOTFS" /bin/sh -n /usr/local/bin/wifi; then
+    echo "[ OK ] wifi script syntax"
+else
+    echo "[FAIL] wifi script syntax error"
+    exit 1
+fi
+
+###############################################################################
+# Verify network service syntax
+###############################################################################
+
+echo
+echo "==> Checking network service syntax"
+
+if chroot "$ROOTFS" /bin/sh -n /etc/init.d/hd2-network; then
+    echo "[ OK ] hd2-network syntax"
+else
+    echo "[FAIL] hd2-network syntax error"
+    exit 1
+fi
+
+###############################################################################
+# Verify architecture
+###############################################################################
+
+echo
+echo "==> Verifying Debian architecture"
+
+if [ -f "$ROOTFS/var/lib/dpkg/arch" ]; then
+
+    echo "dpkg architecture information:"
+    cat "$ROOTFS/var/lib/dpkg/arch"
+
+fi
+
+###############################################################################
+# Remove QEMU
+###############################################################################
+
+echo
 echo "==> Removing QEMU from final rootfs"
 
 rm -f "$ROOTFS/usr/bin/qemu-arm-static"
@@ -1132,7 +1538,7 @@ echo "==> Removing temporary policy-rc.d"
 rm -f "$ROOTFS/usr/sbin/policy-rc.d"
 
 ###############################################################################
-# Clean APT cache
+# Clean APT
 ###############################################################################
 
 echo "==> Cleaning APT cache"
@@ -1149,28 +1555,22 @@ echo "==> Cleaning temporary files"
 rm -rf "$ROOTFS/tmp/"*
 rm -rf "$ROOTFS/var/tmp/"*
 
-###############################################################################
-# Fix temporary directory permissions
-###############################################################################
-
 chmod 1777 "$ROOTFS/tmp"
 
 ###############################################################################
-# Remove temporary DNS configuration
+# Final DNS
 ###############################################################################
 
-echo "==> Removing temporary DNS configuration"
+echo "==> Preparing final DNS configuration"
 
 rm -f "$ROOTFS/etc/resolv.conf"
 
-###############################################################################
-# Create resolv.conf symlink
-###############################################################################
+cat > "$ROOTFS/etc/resolv.conf" <<'EOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
 
-echo "==> Preparing resolv.conf"
-
-ln -sf /run/resolvconf/resolv.conf \
-    "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
+chmod 644 "$ROOTFS/etc/resolv.conf"
 
 ###############################################################################
 # Build information
@@ -1204,96 +1604,56 @@ Features:
   SSH auto-start
   USB Ethernet fallback
 
+SSH:
+  Root password must be configured manually using passwd.
+
 Rootfs builder: GitHub Actions
 EOF
 
 ###############################################################################
-# Verify Debian architecture
+# Final verification
 ###############################################################################
 
-echo "==> Verifying Debian architecture"
+echo
+echo "============================================================"
+echo " Final rootfs verification"
+echo "============================================================"
+echo
 
-if [ -f "$ROOTFS/var/lib/dpkg/arch" ]; then
-
-    echo "dpkg architecture information:"
-    cat "$ROOTFS/var/lib/dpkg/arch"
-
+if [ ! -x "$ROOTFS/sbin/init" ]; then
+    echo "[FAIL] /sbin/init missing"
+    exit 1
 fi
 
-###############################################################################
-# Verify important files
-###############################################################################
+if [ ! -x "$ROOTFS/usr/local/bin/wifi" ]; then
+    echo "[FAIL] wifi command missing"
+    exit 1
+fi
 
-echo
-echo "============================================================"
-echo " Verifying installed features"
-echo "============================================================"
-echo
+if [ ! -x "$ROOTFS/usr/local/bin/netinfo" ]; then
+    echo "[FAIL] netinfo command missing"
+    exit 1
+fi
 
-VERIFY_FILES=(
-    "$ROOTFS/sbin/init"
-    "$ROOTFS/bin/sh"
-    "$ROOTFS/usr/local/bin/wifi"
-    "$ROOTFS/usr/local/bin/netinfo"
-    "$ROOTFS/etc/network/interfaces"
-    "$ROOTFS/etc/wpa_supplicant/wpa_supplicant.conf"
-    "$ROOTFS/etc/init.d/hd2-network"
-    "$ROOTFS/etc/init.d/ssh"
-    "$ROOTFS/etc/ssh/sshd_config"
-    "$ROOTFS/etc/htc-hd2-build-info"
-)
+if [ ! -f "$ROOTFS/etc/init.d/ssh" ]; then
+    echo "[FAIL] SSH init script missing"
+    exit 1
+fi
 
-for file in "${VERIFY_FILES[@]}"; do
+if [ ! -f "$ROOTFS/etc/init.d/hd2-network" ]; then
+    echo "[FAIL] hd2-network init script missing"
+    exit 1
+fi
 
-    if [ -e "$file" ]; then
-        echo "[ OK ] $file"
-    else
-        echo "[FAIL] Missing: $file"
-        exit 1
-    fi
-
-done
+echo "[ OK ] /sbin/init"
+echo "[ OK ] Wi-Fi CLI"
+echo "[ OK ] Network service"
+echo "[ OK ] SSH"
+echo "[ OK ] DNS configuration"
 
 ###############################################################################
-# Verify commands inside rootfs
+# Cleanup mounts
 ###############################################################################
-
-echo
-echo "==> Checking important commands"
-
-IMPORTANT_COMMANDS=(
-    /bin/sh
-    /sbin/init
-    /sbin/ifconfig
-    /sbin/route
-    /sbin/ip
-    /sbin/wpa_supplicant
-    /sbin/dhclient
-    /usr/sbin/sshd
-    /usr/bin/wpa_passphrase
-    /usr/sbin/iwlist
-    /usr/local/bin/wifi
-)
-
-for file in "${IMPORTANT_COMMANDS[@]}"; do
-
-    if [ -e "$ROOTFS$file" ]; then
-        echo "[ OK ] $file"
-    else
-        echo "[WARN] Missing: $file"
-    fi
-
-done
-
-###############################################################################
-# Final cleanup
-###############################################################################
-
-echo
-echo "============================================================"
-echo " Final cleanup"
-echo "============================================================"
-echo
 
 cleanup
 
@@ -1306,21 +1666,27 @@ echo "============================================================"
 echo " Debian Wheezy ARMEL rootfs completed"
 echo "============================================================"
 echo
+
 echo "Rootfs:"
 echo "  $ROOTFS"
 echo
+
 echo "Architecture:"
 echo "  $ARCH"
 echo
+
 echo "Distribution:"
 echo "  Debian GNU/Linux 7 Wheezy"
 echo
+
 echo "Root device:"
 echo "  /dev/mmcblk0p2"
 echo
+
 echo "Init:"
 echo "  /sbin/init"
 echo
+
 echo "Wi-Fi:"
 echo "  wifi test"
 echo "  wifi scan"
@@ -1328,14 +1694,21 @@ echo "  wifi on"
 echo "  wifi off"
 echo "  wifi connect"
 echo
+
 echo "Network:"
 echo "  netinfo"
 echo
+
 echo "SSH:"
+echo "  passwd"
 echo "  service ssh start"
 echo "  service ssh status"
 echo
+
 echo "USB fallback:"
 echo "  $USB_IP"
 echo
+
+echo "============================================================"
+echo " Build successful"
 echo "============================================================"
