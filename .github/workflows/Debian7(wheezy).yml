@@ -162,4 +162,168 @@ jobs:
           path: |
             output/debian-wheezy-armel.tar.xz
             output/SHA256SUMS
+          if-no-files-found: errorname: Build Debian 7 Wheezy ARMEL
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build HTC HD2 Debian Wheezy ARMEL rootfs
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Disable third-party APT repositories
+        run: |
+          echo "==> Disabling third-party APT repositories"
+
+          if [ -d /etc/apt/sources.list.d ]; then
+            sudo find /etc/apt/sources.list.d \
+              -type f \
+              \( -name "*.list" -o -name "*.sources" \) \
+              -exec sh -c '
+                for file do
+                  mv "$file" "$file.disabled"
+                done
+              ' sh {} +
+          fi
+
+          echo "==> Remaining APT sources:"
+          grep -Rhs \
+            -E '^[[:space:]]*(deb|Types:)' \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d \
+            2>/dev/null || true
+
+      - name: Clean APT cache
+        run: |
+          echo "==> Cleaning Ubuntu APT cache"
+
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo mkdir -p /var/lib/apt/lists/partial
+
+      - name: Install build dependencies
+        run: |
+          echo "==> Updating Ubuntu package lists"
+
+          sudo apt-get update
+
+          echo "==> Installing build dependencies"
+
+          sudo apt-get install -y \
+            debootstrap \
+            qemu-user-static \
+            binfmt-support \
+            rsync \
+            xz-utils \
+            tar \
+            gzip
+
+      - name: Enable ARM emulation
+        run: |
+          echo "==> Enabling QEMU ARM"
+
+          sudo update-binfmts --enable qemu-arm || true
+
+          if [ ! -x /usr/bin/qemu-arm-static ]; then
+            echo "ERROR: qemu-arm-static is not available."
+            exit 1
+          fi
+
+          echo "==> QEMU ARM:"
+          file /usr/bin/qemu-arm-static
+
+      - name: Check debootstrap
+        run: |
+          echo "==> Checking debootstrap"
+
+          debootstrap --version
+
+      - name: Make build script executable
+        run: |
+          chmod +x scripts/build-wheezy-armel.sh
+
+      - name: Build Debian Wheezy ARMEL rootfs
+        run: |
+          echo "==> Starting Debian Wheezy ARMEL rootfs build"
+
+          sudo scripts/build-wheezy-armel.sh
+
+      - name: Verify rootfs
+        run: |
+          echo "============================================================"
+          echo " Verifying rootfs"
+          echo "============================================================"
+
+          sudo test -d output/rootfs
+          sudo test -x output/rootfs/sbin/init
+          sudo test -f output/rootfs/etc/debian_version
+          sudo test -f output/rootfs/etc/htc-hd2-build-info
+
+          echo
+          echo "=== Debian version ==="
+          sudo cat output/rootfs/etc/debian_version
+
+          echo
+          echo "=== Build info ==="
+          sudo cat output/rootfs/etc/htc-hd2-build-info
+
+          echo
+          echo "=== Init ==="
+          sudo ls -l output/rootfs/sbin/init
+
+          echo
+          echo "=== Architecture ==="
+          sudo file output/rootfs/sbin/init
+
+      - name: Create compressed rootfs
+        run: |
+          echo "==> Creating compressed rootfs"
+
+          sudo tar \
+            --numeric-owner \
+            --xattrs \
+            --acls \
+            -C output/rootfs \
+            -cJf output/debian-wheezy-armel.tar.xz .
+
+      - name: Generate checksum
+        run: |
+          echo "==> Generating SHA256 checksum"
+
+          cd output
+
+          sha256sum \
+            debian-wheezy-armel.tar.xz \
+            > SHA256SUMS
+
+          echo
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Show result
+        run: |
+          echo "============================================================"
+          echo " Build result"
+          echo "============================================================"
+
+          ls -lh output/
+
+          echo
+          echo "Rootfs archive:"
+          du -h output/debian-wheezy-armel.tar.xz
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-wheezy-armel-rootfs
+          path: |
+            output/debian-wheezy-armel.tar.xz
+            output/SHA256SUMS
           if-no-files-found: error
