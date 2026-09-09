@@ -37,6 +37,29 @@ jobs:
             /etc/apt/sources.list.d \
             2>/dev/null || true
 
+      - name: Configure build resolver
+        run: |
+          echo "==> Configuring DNS resolver"
+
+          sudo cp -L /etc/resolv.conf /etc/resolv.conf.github-actions.backup
+
+          sudo rm -f /etc/resolv.conf
+
+          sudo tee /etc/resolv.conf > /dev/null <<'EOF'
+          nameserver 1.1.1.1
+          nameserver 8.8.8.8
+          EOF
+
+          sudo chmod 644 /etc/resolv.conf
+
+          echo "=== Resolver ==="
+          cat /etc/resolv.conf
+
+          echo
+          echo "=== DNS test ==="
+          getent hosts deb.debian.org || true
+          getent hosts archive.debian.org || true
+
       - name: Clean APT cache
         run: |
           echo "==> Cleaning Ubuntu APT cache"
@@ -79,7 +102,6 @@ jobs:
       - name: Check debootstrap
         run: |
           echo "==> Checking debootstrap"
-
           debootstrap --version
 
       - name: Make build script executable
@@ -119,13 +141,17 @@ jobs:
           echo "=== Architecture ==="
           sudo file output/rootfs/sbin/init
 
+          echo
+          echo "=== Resolver ==="
+          sudo cat output/rootfs/etc/resolv.conf
+
       - name: Create rootfs.ext4
         run: |
           echo "============================================================"
           echo " Creating rootfs.ext4"
           echo "============================================================"
 
-          ROOTFS_SIZE_MB=2048
+          ROOTFS_SIZE_MB=4096
           IMAGE="output/rootfs.ext4"
           MOUNT_POINT="/tmp/rootfs-ext4"
 
@@ -158,8 +184,8 @@ jobs:
 
           echo "==> Copying Debian rootfs"
 
-          sudo cp -a \
-            output/rootfs/. \
+          sudo rsync -aHAX \
+            output/rootfs/ \
             "$MOUNT_POINT/"
 
           echo "==> Syncing filesystem"
@@ -169,7 +195,6 @@ jobs:
           echo "==> Unmounting image"
 
           sudo umount "$MOUNT_POINT"
-
           sudo rmdir "$MOUNT_POINT"
 
           echo "==> Checking ext4 filesystem"
