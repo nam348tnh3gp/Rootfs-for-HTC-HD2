@@ -314,7 +314,10 @@ jobs:
 
           rm -f /tmp/rootfs-roundtrip.ext4
 
-      - name: Generate checksum
+      # =========================================================
+      # 4. Tạo checksum riêng cho từng file
+      # =========================================================
+      - name: Generate checksums
         run: |
           echo "==> Generating SHA256 checksums"
 
@@ -322,16 +325,23 @@ jobs:
 
           cd output
 
-          sha256sum \
-            rootfs.ext4 \
-            rootfs.img \
-            > SHA256SUMS
+          sha256sum rootfs.ext4 > rootfs.ext4.sha256
+          sha256sum rootfs.img  > rootfs.img.sha256
+          sha256sum rootfs.ext4 rootfs.img > SHA256SUMS
 
-          chmod a+r SHA256SUMS
+          chmod a+r rootfs.ext4.sha256 rootfs.img.sha256 SHA256SUMS
 
           echo
           echo "=== SHA256SUMS ==="
           cat SHA256SUMS
+
+          echo
+          echo "=== rootfs.ext4.sha256 ==="
+          cat rootfs.ext4.sha256
+
+          echo
+          echo "=== rootfs.img.sha256 ==="
+          cat rootfs.img.sha256
 
       - name: Show result
         run: |
@@ -361,12 +371,42 @@ jobs:
           echo "=== SHA256 ==="
           cat output/SHA256SUMS
 
-      - name: Upload artifacts
+      # =========================================================
+      # 5. Upload artifact RIÊNG cho .ext4
+      # =========================================================
+      - name: Upload rootfs.ext4 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debian-wheezy-armel-rootfs
+          name: debian-wheezy-armel-rootfs-ext4
+          path: |
+            output/rootfs.ext4
+            output/rootfs.ext4.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      # =========================================================
+      # 6. Upload artifact RIÊNG cho .img
+      # =========================================================
+      - name: Upload rootfs.img artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-wheezy-armel-rootfs-img
+          path: |
+            output/rootfs.img
+            output/rootfs.img.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      # =========================================================
+      # 7. Upload artifact tổng hợp (cả 2 + SHA tổng)
+      # =========================================================
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-wheezy-armel-rootfs-all
           path: |
             output/rootfs.ext4
             output/rootfs.img
             output/SHA256SUMS
           if-no-files-found: error
+          compression-level: 0
