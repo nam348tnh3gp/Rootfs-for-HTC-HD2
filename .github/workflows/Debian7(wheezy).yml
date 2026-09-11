@@ -10,6 +10,7 @@ jobs:
   build:
     name: Build HTC HD2 Debian Wheezy ARMEL rootfs
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -30,19 +31,9 @@ jobs:
               ' sh {} +
           fi
 
-          echo "==> Remaining APT sources:"
-          grep -Rhs \
-            -E '^[[:space:]]*(deb|Types:)' \
-            /etc/apt/sources.list \
-            /etc/apt/sources.list.d \
-            2>/dev/null || true
-
       - name: Configure build resolver
         run: |
-          echo "==> Configuring DNS resolver"
-
           sudo cp -L /etc/resolv.conf /etc/resolv.conf.github-actions.backup
-
           sudo rm -f /etc/resolv.conf
 
           sudo tee /etc/resolv.conf > /dev/null <<'EOF'
@@ -57,23 +48,17 @@ jobs:
 
           echo
           echo "=== DNS test ==="
-          getent hosts deb.debian.org || true
           getent hosts archive.debian.org || true
+          getent hosts deb.debian.org || true
 
       - name: Clean APT cache
         run: |
-          echo "==> Cleaning Ubuntu APT cache"
-
           sudo rm -rf /var/lib/apt/lists/*
           sudo mkdir -p /var/lib/apt/lists/partial
 
       - name: Install build dependencies
         run: |
-          echo "==> Updating Ubuntu package lists"
-
           sudo apt-get update
-
-          echo "==> Installing build dependencies"
 
           sudo apt-get install -y \
             debootstrap \
@@ -83,12 +68,12 @@ jobs:
             xz-utils \
             tar \
             gzip \
-            e2fsprogs
+            e2fsprogs \
+            xxd \
+            android-sdk-libsparse-utils
 
       - name: Enable ARM emulation
         run: |
-          echo "==> Enabling QEMU ARM"
-
           sudo update-binfmts --enable qemu-arm || true
 
           if [ ! -x /usr/bin/qemu-arm-static ]; then
@@ -96,13 +81,23 @@ jobs:
             exit 1
           fi
 
-          echo "==> QEMU ARM:"
           file /usr/bin/qemu-arm-static
 
-      - name: Check debootstrap
+      - name: Check tools
         run: |
-          echo "==> Checking debootstrap"
           debootstrap --version
+
+          echo
+          echo "=== img2simg ==="
+          img2simg --help 2>&1 | head -5 || true
+
+          echo
+          echo "=== simg2img ==="
+          simg2img --help 2>&1 | head -5 || true
+
+          echo
+          echo "=== xxd ==="
+          xxd -h 2>&1 | head -3 || true
 
       - name: Make build script executable
         run: |
@@ -110,8 +105,6 @@ jobs:
 
       - name: Build Debian Wheezy ARMEL rootfs
         run: |
-          echo "==> Starting Debian Wheezy ARMEL rootfs build"
-
           sudo scripts/build-wheezy-armel.sh
 
       - name: Verify rootfs
@@ -141,15 +134,16 @@ jobs:
           echo "=== Architecture ==="
           sudo file output/rootfs/sbin/init
 
-          echo
-          echo "=== Resolver ==="
-          sudo cat output/rootfs/etc/resolv.conf
-
-      - name: Create rootfs.ext4
+      # =========================================================
+      # 1. Tạo ext4 raw image (.ext4)
+      # =========================================================
+      - name: Create rootfs.ext4 (raw ext4 image)
         run: |
           echo "============================================================"
-          echo " Creating rootfs.ext4"
+          echo " Creating rootfs.ext4 (raw ext4)"
           echo "============================================================"
+
+          set -euo pipefail
 
           ROOTFS_SIZE_MB=4096
           IMAGE="output/rootfs.ext4"
@@ -160,7 +154,6 @@ jobs:
           sudo mkdir -p "$MOUNT_POINT"
 
           echo "==> Allocating image"
-
           sudo dd \
             if=/dev/zero \
             of="$IMAGE" \
@@ -169,62 +162,165 @@ jobs:
             status=progress
 
           echo "==> Creating ext4 filesystem"
-
           sudo mkfs.ext4 \
             -F \
             -L debian \
+            -m 1 \
             "$IMAGE"
 
           echo "==> Mounting ext4 image"
-
-          sudo mount \
-            -o loop \
-            "$IMAGE" \
-            "$MOUNT_POINT"
+          sudo mount -o loop "$IMAGE" "$MOUNT_POINT"
 
           echo "==> Copying Debian rootfs"
-
-          sudo rsync -aHAX \
+          sudo rsync \
+            -aHAX \
+            --numeric-ids \
             output/rootfs/ \
             "$MOUNT_POINT/"
 
           echo "==> Syncing filesystem"
-
           sudo sync
 
           echo "==> Unmounting image"
-
           sudo umount "$MOUNT_POINT"
           sudo rmdir "$MOUNT_POINT"
 
-          echo "==> Checking ext4 filesystem"
+          echo "==> Checking ext4 filesystem (read-only, no repair)"
+          sudo e2fsck -f -n "$IMAGE" || true
 
-          sudo e2fsck \
-            -f \
-            -p \
-            "$IMAGE" || true
-
+          echo "==> Fixing image permissions"
           sudo chmod a+r "$IMAGE"
 
           echo
           echo "=== rootfs.ext4 ==="
           ls -lh "$IMAGE"
+          du -h "$IMAGE"
+          file "$IMAGE"
+
+      # =========================================================
+      # 2. Tạo Android sparse image (.img) — CHUẨN
+      # =========================================================
+      - name: Create rootfs.img (Android sparse image)
+        run: |
+          echo "============================================================"
+          echo " Creating rootfs.img (Android sparse image)"
+          echo "============================================================"
+
+          set -euo pipefail
+
+          SRC="output/rootfs.ext4"
+          DST="output/rootfs.img"
+
+          echo "==> Checking img2simg"
+
+          if ! command -v img2simg >/dev/null 2>&1; then
+            echo "ERROR: img2simg not found."
+            echo "Install android-sdk-libsparse-utils."
+            exit 1
+          fi
+
+          echo "==> Source image info"
+          ls -lh "$SRC"
+          du -h "$SRC"
+
+          echo "==> Converting raw ext4 -> Android sparse"
+          img2simg "$SRC" "$DST"
+
+          sudo chmod a+r "$DST"
 
           echo
-          echo "=== Filesystem ==="
-          sudo file "$IMAGE"
+          echo "=== rootfs.img ==="
+          ls -lh "$DST"
+          du -h "$DST"
+
+          echo
+          echo "=== file ==="
+          file "$DST"
+
+          echo
+          echo "=== Magic bytes ==="
+          xxd -l 16 "$DST"
+
+          echo
+          echo "==> Asserting Android sparse magic"
+
+          MAGIC=$(xxd -p -l 4 "$DST")
+
+          if [ "$MAGIC" != "3aff26ed" ]; then
+            echo "ERROR: invalid sparse magic: $MAGIC (expected: 3aff26ed)"
+            exit 1
+          fi
+
+          echo "OK: magic = $MAGIC"
+
+      # =========================================================
+      # 3. Verify: sparse image phải convert ngược lại được
+      # =========================================================
+      - name: Verify rootfs.img (round-trip)
+        run: |
+          echo "============================================================"
+          echo " Verifying rootfs.img (round-trip)"
+          echo "============================================================"
+
+          set -euo pipefail
+
+          echo "==> Round-trip: simg2img -> so sánh với ext4 gốc"
+
+          simg2img output/rootfs.img /tmp/rootfs-roundtrip.ext4
+
+          echo "==> SHA256 so sánh"
+
+          SHA_ORIG=$(sha256sum output/rootfs.ext4 | awk '{print $1}')
+          SHA_RT=$(sha256sum /tmp/rootfs-roundtrip.ext4 | awk '{print $1}')
+
+          echo "ext4 gốc   : $SHA_ORIG"
+          echo "round-trip : $SHA_RT"
+
+          if [ "$SHA_ORIG" != "$SHA_RT" ]; then
+            echo "ERROR: round-trip mismatch!"
+            exit 1
+          fi
+
+          echo
+          echo "==> OK: rootfs.img là sparse image hợp lệ"
+
+          echo
+          echo "==> Mount thử round-trip image"
+
+          TEST_MNT="/tmp/verify-img"
+          sudo mkdir -p "$TEST_MNT"
+
+          sudo mount -o loop,ro /tmp/rootfs-roundtrip.ext4 "$TEST_MNT"
+
+          echo "--- /etc/debian_version ---"
+          sudo cat "$TEST_MNT/etc/debian_version"
+
+          echo "--- /sbin/init ---"
+          sudo ls -l "$TEST_MNT/sbin/init"
+
+          sudo umount "$TEST_MNT"
+          sudo rmdir "$TEST_MNT"
+
+          rm -f /tmp/rootfs-roundtrip.ext4
 
       - name: Generate checksum
         run: |
-          echo "==> Generating SHA256 checksum"
+          echo "==> Generating SHA256 checksums"
+
+          set -euo pipefail
+
+          cd output
 
           sudo sha256sum \
-            output/rootfs.ext4 \
-            | sudo tee output/SHA256SUMS > /dev/null
+            rootfs.ext4 \
+            rootfs.img \
+            > SHA256SUMS
+
+          sudo chmod a+r SHA256SUMS
 
           echo
           echo "=== SHA256SUMS ==="
-          sudo cat output/SHA256SUMS
+          cat SHA256SUMS
 
       - name: Fix output permissions
         run: |
@@ -247,18 +343,29 @@ jobs:
           ls -lh output/
 
           echo
-          echo "=== rootfs.ext4 size ==="
+          echo "=== rootfs.ext4 ==="
+          file output/rootfs.ext4
           du -h output/rootfs.ext4
+
+          echo
+          echo "=== rootfs.img ==="
+          file output/rootfs.img
+          du -h output/rootfs.img
+
+          echo
+          echo "=== Magic rootfs.img ==="
+          xxd -l 16 output/rootfs.img
 
           echo
           echo "=== SHA256 ==="
           cat output/SHA256SUMS
 
-      - name: Upload rootfs.ext4
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: debian-wheezy-armel-rootfs
           path: |
             output/rootfs.ext4
+            output/rootfs.img
             output/SHA256SUMS
           if-no-files-found: error
