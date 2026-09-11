@@ -154,7 +154,7 @@ jobs:
 
           set -euo pipefail
 
-          ROOTFS_SIZE_MB=4096
+          ROOTFS_SIZE_MB=4000
           IMAGE="output/rootfs.ext4"
           MOUNT_POINT="/tmp/rootfs-ext4"
 
