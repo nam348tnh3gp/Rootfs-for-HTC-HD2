@@ -135,6 +135,15 @@ jobs:
           sudo file output/rootfs/sbin/init
 
       # =========================================================
+      # 0. Chown output/ về runner — fix quyền ghi
+      # =========================================================
+      - name: Take ownership of output directory
+        run: |
+          echo "==> Fixing output ownership"
+          sudo chown -R "$(id -u):$(id -g)" output
+          ls -la output/
+
+      # =========================================================
       # 1. Tạo ext4 raw image (.ext4)
       # =========================================================
       - name: Create rootfs.ext4 (raw ext4 image)
@@ -188,8 +197,9 @@ jobs:
           echo "==> Checking ext4 filesystem (read-only, no repair)"
           sudo e2fsck -f -n "$IMAGE" || true
 
-          echo "==> Fixing image permissions"
+          echo "==> Fixing permissions and ownership"
           sudo chmod a+r "$IMAGE"
+          sudo chown "$(id -u):$(id -g)" "$IMAGE"
 
           echo
           echo "=== rootfs.ext4 ==="
@@ -226,7 +236,7 @@ jobs:
           echo "==> Converting raw ext4 -> Android sparse"
           img2simg "$SRC" "$DST"
 
-          sudo chmod a+r "$DST"
+          chmod a+r "$DST"
 
           echo
           echo "=== rootfs.img ==="
@@ -266,6 +276,7 @@ jobs:
 
           echo "==> Round-trip: simg2img -> so sánh với ext4 gốc"
 
+          rm -f /tmp/rootfs-roundtrip.ext4
           simg2img output/rootfs.img /tmp/rootfs-roundtrip.ext4
 
           echo "==> SHA256 so sánh"
@@ -311,26 +322,16 @@ jobs:
 
           cd output
 
-          sudo sha256sum \
+          sha256sum \
             rootfs.ext4 \
             rootfs.img \
             > SHA256SUMS
 
-          sudo chmod a+r SHA256SUMS
+          chmod a+r SHA256SUMS
 
           echo
           echo "=== SHA256SUMS ==="
           cat SHA256SUMS
-
-      - name: Fix output permissions
-        run: |
-          echo "==> Fixing output permissions"
-
-          sudo chmod -R a+rX output
-
-          echo
-          echo "=== Output ==="
-          ls -lh output/
 
       - name: Show result
         run: |
