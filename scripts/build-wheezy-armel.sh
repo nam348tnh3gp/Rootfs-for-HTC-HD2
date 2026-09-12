@@ -432,6 +432,25 @@ apt-get \
     matchbox-keyboard \
     libts-bin
 
+###############################################################################
+# Verify xinit / startx installed
+###############################################################################
+
+echo "==> Verifying xinit installation"
+
+if ! dpkg-query -W -f='${Status}' xinit 2>/dev/null \
+    | grep -q "install ok installed"; then
+    echo "ERROR: xinit package was not installed."
+    exit 1
+fi
+
+if [ ! -x /usr/bin/startx ]; then
+    echo "ERROR: /usr/bin/startx not found or not executable."
+    exit 1
+fi
+
+echo "[ OK ] xinit installed and /usr/bin/startx present"
+
 CHROOT
 
 ###############################################################################
@@ -446,6 +465,20 @@ if [ ! -x "$ROOTFS/sbin/init" ]; then
 fi
 
 ls -l "$ROOTFS/sbin/init"
+
+###############################################################################
+# Framebuffer / touchscreen early warning
+###############################################################################
+
+echo
+echo "==> Checking HTC HD2 framebuffer hints"
+
+if [ -e /dev/fb0 ]; then
+    echo "[INFO] Host /dev/fb0 exists (this is host, not target)."
+fi
+
+echo "[INFO] Target HTC HD2 must provide /dev/fb0 from kernel."
+echo "[INFO] If target has no /dev/fb0, Xorg fbdev will fail."
 
 ###############################################################################
 # Wi-Fi configuration
@@ -1434,6 +1467,12 @@ wait \$XTERM_PID
 
 kill \$KEYBOARD_PID 2>/dev/null || true
 
+###############################################################################
+# Small delay to avoid init respawn busy-loop if X exits fast.
+###############################################################################
+
+sleep 3
+
 exit 0
 EOF
 
@@ -1448,14 +1487,20 @@ chmod 755 "$ROOTFS/root/.xinitrc"
 cat > "$ROOTFS/usr/local/bin/hd2-gui" <<EOF
 #!/bin/sh
 
-PATH=/sbin:/bin:/usr/sbin:/usr/bin
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
+export PATH
 
 DISPLAY="$DISPLAY_NUM"
 VT="$X_VT"
-
 export DISPLAY
 
 mkdir -p /var/log
+
+###############################################################################
+# Avoid init respawn busy-loop if something exits too quickly.
+###############################################################################
+
+trap 'sleep 2' EXIT
 
 ###############################################################################
 # Do not launch if X is already running.
@@ -1466,6 +1511,25 @@ if [ -S /tmp/.X11-unix/X0 ]; then
 fi
 
 ###############################################################################
+# Verify startx exists before exec.
+###############################################################################
+
+if [ ! -x /usr/bin/startx ]; then
+    echo "ERROR: /usr/bin/startx not found or not executable" \
+        >> /var/log/hd2-gui.log
+    exit 1
+fi
+
+###############################################################################
+# Warn if framebuffer is missing.
+###############################################################################
+
+if [ ! -e /dev/fb0 ]; then
+    echo "WARNING: /dev/fb0 not found. Xorg fbdev will likely fail." \
+        >> /var/log/hd2-gui.log
+fi
+
+###############################################################################
 # Start X through startx.
 #
 # Since this script is executed by init on tty1, startx gets
@@ -1473,7 +1537,7 @@ fi
 # background daemon.
 ###############################################################################
 
-exec startx /root/.xinitrc -- "\$DISPLAY" "\$VT" \
+exec /usr/bin/startx /root/.xinitrc -- "\$DISPLAY" "\$VT" \
     >> /var/log/hd2-gui.log 2>&1
 EOF
 
@@ -1690,6 +1754,42 @@ IMPORTANT_COMMANDS=(
 )
 
 for file in "${IMPORTANT_COMMANDS[@]}"; do
+
+    if [ -e "$ROOTFS$file" ]; then
+        echo "[ OK ] $file"
+    else
+        echo "[WARN] Missing: $file"
+    fi
+
+done
+
+###############################################################################
+# Verify startx executable
+###############################################################################
+
+echo
+echo "==> Verifying /usr/bin/startx"
+
+if [ -x "$ROOTFS/usr/bin/startx" ]; then
+    echo "[ OK ] /usr/bin/startx executable"
+else
+    echo "[FAIL] /usr/bin/startx missing or not executable"
+    exit 1
+fi
+
+###############################################################################
+# Verify Xorg fbdev and evdev driver files
+###############################################################################
+
+echo
+echo "==> Verifying Xorg driver modules"
+
+XORG_DRIVER_FILES=(
+    /usr/lib/xorg/modules/drivers/fbdev_drv.so
+    /usr/lib/xorg/modules/input/evdev_drv.so
+)
+
+for file in "${XORG_DRIVER_FILES[@]}"; do
 
     if [ -e "$ROOTFS$file" ]; then
         echo "[ OK ] $file"
